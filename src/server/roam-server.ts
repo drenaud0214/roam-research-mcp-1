@@ -487,6 +487,19 @@ export class RoamServer {
             };
           }
 
+          case 'roam_triage_tasks': {
+            const { page_title_uid, at_risk_days, stale_days, dry_run } = cleanedArgs as {
+              page_title_uid?: string;
+              at_risk_days?: number;
+              stale_days?: number;
+              dry_run?: boolean;
+            };
+            const result = await toolHandlers.triageTasks({ page_title_uid, at_risk_days, stale_days, dry_run });
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            };
+          }
+
           default:
             throw new McpError(
               ErrorCode.MethodNotFound,
