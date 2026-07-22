@@ -23,7 +23,7 @@ export function isPortInUse(port: number): Promise<boolean> {
       resolve(false);
     });
 
-    server.listen(port);
+    server.listen(port, '127.0.0.1');
   });
 }
 

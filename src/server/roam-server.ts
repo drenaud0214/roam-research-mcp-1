@@ -608,7 +608,7 @@ export class RoamServer {
       });
 
       const availableHttpPort = await findAvailablePort(parseInt(HTTP_STREAM_PORT));
-      httpServer.listen(availableHttpPort, () => {
+      httpServer.listen(availableHttpPort, '127.0.0.1', () => {
 
       });
 
