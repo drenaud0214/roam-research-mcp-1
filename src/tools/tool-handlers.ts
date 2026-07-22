@@ -13,6 +13,7 @@ import { BatchOperations } from './operations/batch.js';
 import { TableOperations, type TableInput } from './operations/table.js';
 import { DatomicSearchHandlerImpl } from './operations/search/handlers.js';
 import { FullPageViewOperations } from './operations/full-page-view.js';
+import { TaskAgingOperations, type TriageTasksParams } from './operations/task-aging.js';
 
 export class ToolHandlers {
   private pageOps: PageOperations;
@@ -25,6 +26,7 @@ export class ToolHandlers {
   private batchOps: BatchOperations;
   private tableOps: TableOperations;
   private fullPageViewOps: FullPageViewOperations;
+  private taskAgingOps: TaskAgingOperations;
   private cachedCheatsheet: string | null = null;
 
   constructor(private graph: Graph, memoriesTag: string | null = 'Memories') {
@@ -38,6 +40,7 @@ export class ToolHandlers {
     this.batchOps = new BatchOperations(graph);
     this.tableOps = new TableOperations(graph);
     this.fullPageViewOps = new FullPageViewOperations(graph, this.pageOps);
+    this.taskAgingOps = new TaskAgingOperations(graph);
   }
 
   // Page Operations
@@ -179,6 +182,11 @@ export class ToolHandlers {
   // Page Rename
   async renamePage(params: { old_title?: string; uid?: string; new_title: string }) {
     return this.pageOps.renamePage(params);
+  }
+
+  // Task Aging Operations
+  async triageTasks(params: TriageTasksParams) {
+    return this.taskAgingOps.triageTasks(params);
   }
 
   async getRoamMarkdownCheatsheet() {

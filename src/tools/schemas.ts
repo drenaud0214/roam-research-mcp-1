@@ -790,4 +790,35 @@ export const toolSchemas = {
       required: ['new_title']
     }
   },
+  roam_triage_tasks: {
+    name: 'roam_triage_tasks',
+    description: 'Scan undated TODO blocks and apply aging tags (#at-risk, #stale) based on how long they have sat without a due date. Fresh tasks (< at_risk_days) are untouched. At-risk tasks get #at-risk appended. Stale tasks get #stale appended (and #at-risk removed if present). Tasks already tagged #parked or #someday are skipped. Tasks with date page refs ([[Month Day, Year]]) or #due/#scheduled tags are skipped. Use dry_run=true to preview without writing.',
+    inputSchema: {
+      type: 'object',
+      properties: withMultiGraphParams({
+        page_title_uid: {
+          type: 'string',
+          description: 'Limit triage to a specific page (title or UID). Omit to scan all pages.'
+        },
+        at_risk_days: {
+          type: 'integer',
+          description: 'Days without a due date before a task is marked #at-risk. Default: 14.',
+          default: 14,
+          minimum: 1
+        },
+        stale_days: {
+          type: 'integer',
+          description: 'Days without a due date before a task is marked #stale. Default: 30.',
+          default: 30,
+          minimum: 1
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, return the triage report without writing any changes to Roam. Default: false.',
+          default: false
+        }
+      }),
+      required: []
+    }
+  },
 };
