@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { findAvailablePort, isPortInUse } from '../utils/net.js';
+import { isPortInUse, listenWithRetry } from '../utils/net.js';
 import { CORS_ORIGINS } from '../config/environment.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -667,13 +667,14 @@ export class RoamServer {
           );
         });
       } else {
-        const availableHttpPort = await findAvailablePort(desiredPort, 2, HTTP_STREAM_HOST);
         // Bind the companion HTTP transport to HTTP_STREAM_HOST (loopback by
         // default) — listening without a host binds every interface, exposing
         // the graph token-free on the LAN.
-        httpServer.listen(availableHttpPort, HTTP_STREAM_HOST, () => {
-
-        });
+        //
+        // Bind-and-retry rather than probe-then-bind: clients launch one
+        // instance per configured graph simultaneously, and a probe that closes
+        // before the real bind lets them all pick the same port.
+        await listenWithRetry(httpServer, desiredPort, 2, HTTP_STREAM_HOST);
       }
 
 

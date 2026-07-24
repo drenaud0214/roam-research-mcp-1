@@ -1,4 +1,5 @@
 import { createServer } from 'node:net';
+import type { Server } from 'node:net';
 
 /**
  * Checks if a given port is currently in use.
@@ -52,4 +53,68 @@ export async function findAvailablePort(startPort: number, incrementBy = 2, host
     port += incrementBy;
   }
   return port;
+}
+
+/**
+ * Binds `server` to the first free port at or after `startPort`, retrying on
+ * EADDRINUSE.
+ *
+ * Prefer this over `findAvailablePort` + `listen`: probing with a throwaway
+ * socket and binding afterwards leaves a window between the probe closing and
+ * the real bind. MCP clients start one instance of this server per configured
+ * graph, all within the same millisecond, so every instance probes the same
+ * port, every probe reports it free, and all but one die on EADDRINUSE. Here
+ * the bind *is* the test, so the kernel arbitrates and the losers simply move
+ * to the next port.
+ *
+ * @param server The server to bind.
+ * @param startPort The first port to try.
+ * @param incrementBy How much to advance the port after each conflict.
+ * @param host Optional host to bind. When omitted, binds every interface.
+ * @param maxAttempts Give up (and reject) after this many conflicts.
+ * @returns A promise that resolves to the port actually bound.
+ */
+export function listenWithRetry(
+  server: Server,
+  startPort: number,
+  incrementBy = 2,
+  host?: string,
+  maxAttempts = 50
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let port = startPort;
+    let attempts = 0;
+
+    const cleanup = () => {
+      server.removeListener('error', onError);
+      server.removeListener('listening', onListening);
+    };
+
+    const onError = (err: NodeJS.ErrnoException) => {
+      if (err.code !== 'EADDRINUSE' || ++attempts >= maxAttempts) {
+        cleanup();
+        reject(err);
+        return;
+      }
+      port += incrementBy;
+      attempt();
+    };
+
+    const onListening = () => {
+      cleanup();
+      resolve(port);
+    };
+
+    const attempt = () => {
+      if (host) {
+        server.listen(port, host);
+      } else {
+        server.listen(port);
+      }
+    };
+
+    server.on('error', onError);
+    server.on('listening', onListening);
+    attempt();
+  });
 }
