@@ -10,6 +10,8 @@
 
 import { initializeGraph, type Graph } from '@roam-research/roam-api-sdk';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { RoamError } from '../shared/errors.js';
+import { DEFAULT_GUIDELINES_PAGE } from '../tools/operations/guidelines.js';
 
 /**
  * Configuration for a single Roam graph
@@ -21,6 +23,8 @@ export interface GraphConfig {
   protected?: boolean;
   /** Tag used for roam_remember/roam_recall. Defaults to ROAM_MEMORIES_TAG env var or "Memories". Set to false to disable. */
   memoriesTag?: string | false;
+  /** Page holding this graph's agent conventions. Defaults to ROAM_GUIDELINES_PAGE env var or "roam/agent guidelines". Set to false to disable. */
+  guidelinesPage?: string | false;
 }
 
 /**
@@ -42,6 +46,7 @@ export const WRITE_OPERATIONS = [
   'roam_move_block',
   'roam_update_page_markdown',
   'roam_rename_page',
+  'roam_triage_tasks',
 ] as const;
 
 export type WriteOperation = typeof WRITE_OPERATIONS[number];
@@ -110,6 +115,34 @@ export class GraphRegistry {
   }
 
   /**
+   * Page holding a graph's agent conventions, or null when explicitly disabled.
+   *
+   * Precedence: per-graph config > ROAM_GUIDELINES_PAGE env var >
+   * "roam/agent guidelines" (the shared convention).
+   *
+   * Reading the conventional title by default is deliberate. It is the same
+   * page Roam's own MCP server reads unconditionally, so writing it once makes
+   * both servers honour it — which is the entire point of a convention, and it
+   * stops working the moment it needs private configuration. Creating a page
+   * with that exact namespaced title IS the opt-in; nobody makes one by
+   * accident. And nothing here reads the graph unprompted: the lookup only
+   * happens when an agent explicitly calls roam_get_guidelines, so the tool
+   * call is already the consent.
+   *
+   * Set `guidelinesPage: false` to turn it off for a graph.
+   */
+  getGuidelinesPage(key?: string): string | null {
+    const resolvedKey = key ?? this.defaultKey;
+    const config = this.configs.get(resolvedKey);
+
+    if (config?.guidelinesPage === false) {
+      return null;
+    }
+
+    return config?.guidelinesPage ?? process.env.ROAM_GUIDELINES_PAGE ?? DEFAULT_GUIDELINES_PAGE;
+  }
+
+  /**
    * Get an initialized Graph instance, creating it lazily if needed
    * @param key - Graph key from config. Defaults to defaultKey if not specified.
    */
@@ -125,9 +158,10 @@ export class GraphRegistry {
     // Get config
     const config = this.configs.get(resolvedKey);
     if (!config) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Unknown graph: "${resolvedKey}". Available graphs: ${this.getAvailableGraphs().join(', ')}`
+      throw new RoamError(
+        `Unknown graph: "${resolvedKey}".`,
+        'UNKNOWN_GRAPH',
+        { requested_graph: resolvedKey, available_graphs: this.getAvailableGraphs() }
       );
     }
 
@@ -190,25 +224,32 @@ export class GraphRegistry {
     if (!this.isWriteAllowed(resolvedKey, providedWriteKey)) {
       const config = this.configs.get(resolvedKey);
       if (!config) {
-        throw new McpError(
-          ErrorCode.InvalidParams,
-          `Unknown graph: "${resolvedKey}". Available graphs: ${this.getAvailableGraphs().join(', ')}`
+        throw new RoamError(
+          `Unknown graph: "${resolvedKey}".`,
+          'UNKNOWN_GRAPH',
+          { requested_graph: resolvedKey, available_graphs: this.getAvailableGraphs() }
         );
       }
 
       const systemWriteKey = process.env.ROAM_SYSTEM_WRITE_KEY;
       if (!systemWriteKey) {
-        throw new McpError(
-          ErrorCode.InvalidParams,
-          `Write to protected graph "${resolvedKey}" failed: ROAM_SYSTEM_WRITE_KEY not configured.`
+        throw new RoamError(
+          `Write to protected graph "${resolvedKey}" failed: ROAM_SYSTEM_WRITE_KEY is not configured on the server.`,
+          'WRITE_KEY_NOT_CONFIGURED',
+          { graph: resolvedKey }
         );
       }
 
-      // Provide informative error with the required key
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Write to "${resolvedKey}" graph requires write_key confirmation.\n` +
-        `Provide write_key: "${systemWriteKey}" to proceed.`
+      // Say what is required, never what the value is. Echoing the key here
+      // hands the caller the means to retry and get through, which makes the
+      // whole gate decorative — including for a caller that simply guessed
+      // wrong. A legitimate operator can read ROAM_SYSTEM_WRITE_KEY from their
+      // own environment; an agent that cannot is exactly who this stops.
+      throw new RoamError(
+        `Write to protected graph "${resolvedKey}" requires write_key confirmation. ` +
+        `Pass the value of the ROAM_SYSTEM_WRITE_KEY environment variable as the write_key parameter.`,
+        'WRITE_KEY_REQUIRED',
+        { graph: resolvedKey, required_parameter: 'write_key' }
       );
     }
   }

@@ -3,6 +3,8 @@ import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { getPageUid as getPageUidHelper } from '../helpers/page-resolution.js';
 import { resolveRefs } from '../helpers/refs.js';
 import { fetchChildrenByDepth } from '../helpers/fetch-children.js';
+import { collectHiddenUids, pruneHiddenBlocks, isHiddenBlockString } from '../helpers/hidden.js';
+import { escapeBlockString } from '../../shared/block-escaping.js';
 import type { RoamBlock } from '../types/index.js';
 import type { PageOperations } from './pages.js';
 
@@ -41,11 +43,22 @@ export class FullPageViewOperations {
 
     // Deduplicate by block_uid, then cap at max_references
     const seenUids = new Set<string>();
-    const allUniqueRefs = refResults.filter(r => {
+    const dedupedRefs = refResults.filter(r => {
       if (seenUids.has(r.block_uid)) return false;
       seenUids.add(r.block_uid);
       return true;
     });
+
+    // Backlinks come from other pages, so the page's own prune (pageBlocks
+    // above, already filtered by fetchPageByUid) does not cover them. A
+    // referring block may itself be tagged, or sit under a tagged parent
+    // elsewhere — hence the UID closure rather than a text check alone.
+    // Filtered BEFORE the max_references cap so truncation counts what the
+    // caller can actually see.
+    const hiddenUids = await collectHiddenUids(this.graph);
+    const allUniqueRefs = dedupedRefs.filter(
+      r => !hiddenUids.has(r.block_uid) && !isHiddenBlockString(r.block_str)
+    );
     const truncated = allUniqueRefs.length > max_references;
     const uniqueRefs = truncated ? allUniqueRefs.slice(0, max_references) : allUniqueRefs;
 
@@ -115,7 +128,8 @@ export class FullPageViewOperations {
         uid: ref.block_uid,
         string: resolvedRefStrings.get(ref.block_uid) || ref.block_str,
         order: 0,
-        children: childrenMap[ref.block_uid] || []
+        // Children of a visible backlink can still contain tagged subtrees.
+        children: pruneHiddenBlocks(childrenMap[ref.block_uid] || [])
       };
       groupMap.get(key)!.references.push({
         breadcrumbs: breadcrumbsMap[ref.block_uid] || [],
@@ -125,7 +139,11 @@ export class FullPageViewOperations {
 
     const linkedReferenceGroups = Array.from(groupMap.values());
 
-    // 7. Render as markdown
+    // 7. Render as markdown. This output is display-only — never valid
+    // `roam_update_page_markdown` input, and nothing decodes it — so
+    // `renderBlocks` applies the `⏎` sentinel to every block string
+    // unconditionally (it's the identity for newline-free text) rather than
+    // gating on a per-page predicate.
     return this.renderMarkdown(title, pageBlocks, linkedReferenceGroups, truncated ? allUniqueRefs.length : undefined);
   }
 
@@ -312,12 +330,18 @@ export class FullPageViewOperations {
           // This mirrors Roam's ancestor context display
           for (let i = 0; i < ref.breadcrumbs.length; i++) {
             const prefix = '> '.repeat(i + 1);
-            lines.push(`${prefix}${ref.breadcrumbs[i].string}`);
+            // Same reasoning as `renderBlocks` below: a breadcrumb string can
+            // itself carry a soft line break, and an unescaped one spills onto
+            // a bare physical line with no `> ` prefix at all.
+            lines.push(`${prefix}${escapeBlockString(ref.breadcrumbs[i].string)}`);
           }
 
-          // The referring block itself, indented to sit visually under its breadcrumbs
+          // The referring block itself, indented to sit visually under its
+          // breadcrumbs. Escaped for the same reason `renderBlocks` escapes
+          // every other block string in this file: an unescaped newline spills
+          // the rest of the block onto a bare physical line with no bullet.
           const refIndent = '  '.repeat(ref.breadcrumbs.length);
-          lines.push(`${refIndent}- ${ref.block.string}`);
+          lines.push(`${refIndent}- ${escapeBlockString(ref.block.string)}`);
 
           // Children of the referring block
           if (ref.block.children.length > 0) {
@@ -335,12 +359,16 @@ export class FullPageViewOperations {
   private renderBlocks(blocks: RoamBlock[], baseIndent: number): string {
     const renderBlock = (block: RoamBlock, depth: number): string => {
       const indent = '  '.repeat(depth);
+      // Unconditional: `escapeBlockString` is the identity for newline-free
+      // text, so pages with no soft line breaks render byte-identical to how
+      // they did before this feature existed — no predicate needed.
+      const text = escapeBlockString(block.string);
       let line: string;
       if (block.heading && block.heading > 0) {
         const hashes = '#'.repeat(block.heading);
-        line = `${indent}${hashes} ${block.string}`;
+        line = `${indent}${hashes} ${text}`;
       } else {
-        line = `${indent}- ${block.string}`;
+        line = `${indent}- ${text}`;
       }
       const childLines = block.children.map(c => renderBlock(c, depth + 1)).join('\n');
       return childLines ? `${line}\n${childLines}` : line;
