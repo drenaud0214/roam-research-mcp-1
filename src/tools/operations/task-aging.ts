@@ -59,23 +59,27 @@ export class TaskAgingOperations {
 
     const queryStr = targetPageUid
       ? `[:find ?uid ?str ?page-title ?create-time
-          :in $ ?page-uid
+          :in $ ?bracketed ?bare ?page-uid
           :where [?p :block/uid ?page-uid]
                  [?b :block/page ?p]
                  [?p :node/title ?page-title]
                  [?b :block/uid ?uid]
                  [?b :block/string ?str]
-                 [(clojure.string/includes? ?str "{{TODO")]
+                 (or [(clojure.string/includes? ?str ?bracketed)]
+                     [(clojure.string/includes? ?str ?bare)])
                  [(get-else $ ?b :create/time 0) ?create-time]]`
       : `[:find ?uid ?str ?page-title ?create-time
+          :in $ ?bracketed ?bare
           :where [?b :block/string ?str]
                  [?b :block/uid ?uid]
                  [?b :block/page ?p]
                  [?p :node/title ?page-title]
-                 [(clojure.string/includes? ?str "{{TODO")]
+                 (or [(clojure.string/includes? ?str ?bracketed)]
+                     [(clojure.string/includes? ?str ?bare)])
                  [(get-else $ ?b :create/time 0) ?create-time]]`;
 
-    const inputs = targetPageUid ? [targetPageUid] : [];
+    const markers = SearchUtils.statusMarkers('TODO');
+    const inputs = targetPageUid ? [...markers, targetPageUid] : markers;
     const rawResults = await q(this.graph, queryStr, inputs) as [string, string, string, number][];
 
     const batchUpdates: { action: string; block: { uid: string; string: string } }[] = [];
