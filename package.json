@@ -1,6 +1,6 @@
 {
   "name": "roam-research-mcp",
-  "version": "2.22.0",
+  "version": "5.0.0",
   "description": "MCP server and CLI for Roam Research",
   "private": false,
   "repository": {
@@ -31,20 +31,21 @@
   "scripts": {
     "build": "echo \"Using custom instructions: .roam/${CUSTOM_INSTRUCTIONS_PREFIX}custom-instructions.md\" && tsc && cat Roam_Markdown_Cheatsheet.md .roam/${CUSTOM_INSTRUCTIONS_PREFIX}custom-instructions.md > build/Roam_Markdown_Cheatsheet.md && chmod 755 build/index.js build/cli/roam.js",
     "clean": "rm -rf build",
+    "prepublishOnly": "npm run clean && npm run build && node scripts/check-bundled-cheatsheet.mjs",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "start": "node build/index.js",
-    "prepublishOnly": "npm run clean && npm run build",
     "release": "standard-version",
     "release:patch": "standard-version --release-as patch",
     "release:minor": "standard-version --release-as minor",
     "release:major": "standard-version --release-as major",
     "release:first": "standard-version --first-release",
+    "pretest": "tsc",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.13.2",
+    "@modelcontextprotocol/sdk": "1.25.1",
     "@roam-research/roam-api-sdk": "^0.10.0",
     "commander": "^14.0.2",
     "dotenv": "^16.4.7"

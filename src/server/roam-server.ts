@@ -14,6 +14,7 @@ import {
 import { type Graph } from '@roam-research/roam-api-sdk';
 import { HTTP_STREAM_PORT, HTTP_STREAM_HOST, HTTP_AUTH_TOKEN, validateEnvironment } from '../config/environment.js';
 import { isBearerAuthorized } from '../utils/auth.js';
+import { RoamError, toErrorResult } from '../shared/errors.js';
 import { createRegistryFromEnv, GraphRegistry, isWriteOperation } from '../config/graph-registry.js';
 import { toolSchemas } from '../tools/schemas.js';
 import { ToolHandlers } from '../tools/tool-handlers.js';
@@ -22,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { isPortInUse, listenWithRetry } from '../utils/net.js';
+import { isPortInUse } from '../utils/net.js';
 import { CORS_ORIGINS } from '../config/environment.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,6 +33,33 @@ const __dirname = dirname(__filename);
 const packageJsonPath = join(__dirname, '../../package.json');
 const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
 const serverVersion = packageJson.version;
+
+/**
+ * The single place a tool result is built, and the only place
+ * `structuredContent` may be attached.
+ *
+ * The wire invariant is **`structuredContent` is present iff the tool declares
+ * an `outputSchema`**. A schema-bearing tool that returns none, or a
+ * schema-less tool that returns some, is a protocol violation a strict client
+ * will reject. We use the low-level `Server` rather than `McpServer`, so the
+ * SDK does not enforce this for us — routing every result through here is what
+ * enforces it. Adding a schema in schemas.ts is therefore sufficient; no switch
+ * case needs touching.
+ *
+ * The text channel is unchanged either way, so clients that never look at
+ * structuredContent see exactly what they saw before.
+ */
+function toolResult(toolName: string, result: unknown) {
+  const declaresSchema = Boolean(
+    (toolSchemas as Record<string, { outputSchema?: unknown } | undefined>)[toolName]?.outputSchema
+  );
+  const canStructure = declaresSchema && result !== null && typeof result === 'object';
+
+  return {
+    content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    ...(canStructure ? { structuredContent: result as Record<string, unknown> } : {}),
+  };
+}
 
 export class RoamServer {
   private registry: GraphRegistry;
@@ -65,7 +93,8 @@ export class RoamServer {
     }
 
     const memoriesTag = this.registry.getMemoriesTag(graphKey);
-    const handlers = new ToolHandlers(graph, memoriesTag);
+    const guidelinesPage = this.registry.getGuidelinesPage(graphKey);
+    const handlers = new ToolHandlers(graph, memoriesTag, guidelinesPage);
     this.toolHandlersCache.set(graphKey, handlers);
     return handlers;
   }
@@ -180,9 +209,7 @@ export class RoamServer {
               parent_uid,
               include_memories_tag
             );
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_fetch_page_full_view': {
@@ -209,6 +236,11 @@ export class RoamServer {
             };
           }
 
+          case 'roam_get_guidelines': {
+            const result = await toolHandlers.getGuidelines();
+            return toolResult(request.params.name, result);
+          }
+
           case 'roam_fetch_page_by_title': {
             const { title, format } = cleanedArgs as {
               title: string;
@@ -226,9 +258,7 @@ export class RoamServer {
               content?: ContentItem[];
             };
             const result = await toolHandlers.createPage(title, content);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
 
@@ -256,17 +286,13 @@ export class RoamServer {
               parent_string,
               order
             );
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_add_todo': {
             const { todos } = cleanedArgs as { todos: string[] };
             const result = await toolHandlers.addTodos(todos);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_create_outline': {
@@ -282,9 +308,7 @@ export class RoamServer {
               block_text_uid,
               order
             );
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_search_for_tag': {
@@ -300,9 +324,7 @@ export class RoamServer {
               );
             }
             const result = await toolHandlers.searchForTag(primary_tag, page_title_uid, near_tag);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_search_by_status': {
@@ -313,9 +335,7 @@ export class RoamServer {
               exclude?: string;
             };
             const result = await toolHandlers.searchByStatus(status, page_title_uid, include, exclude);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_search_block_refs': {
@@ -325,9 +345,7 @@ export class RoamServer {
               page_title_uid?: string;
             };
             const result = await toolHandlers.searchBlockRefs(params);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_search_hierarchy': {
@@ -347,9 +365,7 @@ export class RoamServer {
             }
 
             const result = await toolHandlers.searchHierarchy(params);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_find_pages_modified_today': {
@@ -357,9 +373,7 @@ export class RoamServer {
               max_num_pages?: number;
             };
             const result = await toolHandlers.findPagesModifiedToday(max_num_pages || 50);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_search_by_text': {
@@ -369,9 +383,7 @@ export class RoamServer {
               scope?: 'blocks' | 'page_titles';
             };
             const result = await toolHandlers.searchByText(params);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_search_by_date': {
@@ -383,9 +395,7 @@ export class RoamServer {
               include_content: boolean;
             };
             const result = await toolHandlers.searchByDate(params);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
 
@@ -395,9 +405,7 @@ export class RoamServer {
               filter_tag?: string;
             };
             const result = await toolHandlers.recall(sort_by, filter_tag);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
 
@@ -407,9 +415,7 @@ export class RoamServer {
               inputs?: unknown[];
             };
             const result = await toolHandlers.executeDatomicQuery({ query, inputs });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_process_batch_actions': {
@@ -417,9 +423,7 @@ export class RoamServer {
               actions: any[];
             };
             const result = await toolHandlers.processBatch(actions);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_fetch_block': {
@@ -429,9 +433,7 @@ export class RoamServer {
               include_ancestors?: boolean;
             };
             const result = await toolHandlers.fetchBlock(block_uid, depth, include_ancestors);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_create_table': {
@@ -447,9 +449,7 @@ export class RoamServer {
               headers,
               rows
             });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_move_block': {
@@ -459,9 +459,7 @@ export class RoamServer {
               order?: number | 'first' | 'last';
             };
             const result = await toolHandlers.moveBlock(block_uid, parent_uid, order);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_update_page_markdown': {
@@ -471,9 +469,7 @@ export class RoamServer {
               dry_run?: boolean;
             };
             const result = await toolHandlers.updatePageMarkdown(title, markdown, dry_run);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_rename_page': {
@@ -483,9 +479,7 @@ export class RoamServer {
               new_title: string;
             };
             const result = await toolHandlers.renamePage({ old_title, uid, new_title });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           case 'roam_triage_tasks': {
@@ -496,9 +490,7 @@ export class RoamServer {
               dry_run?: boolean;
             };
             const result = await toolHandlers.triageTasks({ page_title_uid, at_risk_days, stale_days, dry_run });
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return toolResult(request.params.name, result);
           }
 
           default:
@@ -508,6 +500,13 @@ export class RoamServer {
             );
         }
       } catch (error: unknown) {
+        // A RoamError is a TOOL failure, not a protocol failure: return it as
+        // content with isError so the model can read the code and the recovery
+        // context (available_graphs, and so on) and act on it. Throwing would
+        // collapse all of that into a JSON-RPC error string.
+        if (error instanceof RoamError) {
+          return toErrorResult(error);
+        }
         if (error instanceof McpError) {
           throw error;
         }
@@ -525,12 +524,18 @@ export class RoamServer {
 
     try {
 
-      // In --server (daemon) mode we run HTTP-only: no client reads the stdio
-      // transport, so we skip it. Otherwise behavior is unchanged (stdio + HTTP).
+      // The two transports are mutually exclusive, and each mode opens exactly
+      // one. Stdio mode talks to the client that spawned it over stdin/stdout
+      // and returns here — it opens no socket at all. Nothing about MCP over
+      // stdio needs one, and a listener nobody asked for is pure attack
+      // surface: until 3.1.0 stdio mode also bound an HTTP port, which shipped
+      // a token-free MCP endpoint per spawned instance. Run `--server` when
+      // you want HTTP; that is what it is for.
       if (!serverMode) {
         const stdioMcpServer = this.createMcpServer();
         const stdioTransport = new StdioServerTransport();
         await stdioMcpServer.connect(stdioTransport);
+        return;
       }
 
 
@@ -546,7 +551,7 @@ export class RoamServer {
           res.setHeader('Access-Control-Allow-Origin', '*');
         }
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
         res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
         res.setHeader('Access-Control-Allow-Credentials', 'true');
 
@@ -566,7 +571,11 @@ export class RoamServer {
             status: 'ok',
             name: 'roam-research-mcp',
             version: serverVersion,
-            mode: serverMode ? 'server' : 'stdio+http',
+            // Always 'server' since 3.1.0: this handler is only reachable in
+            // --server mode. Kept as a field because clients read it, and the
+            // retired 'stdio+http' value is how they can tell they are talking
+            // to an older build that still had the stdio-mode listener.
+            mode: 'server',
             auth: HTTP_AUTH_TOKEN ? 'required' : 'none',
             graphs: this.registry.getAvailableGraphs(),
             defaultGraph: this.registry.defaultKey,
@@ -617,6 +626,24 @@ export class RoamServer {
             return;
           }
 
+          // A request that carries a session ID we don't know (the daemon
+          // restarted, or the session was terminated) is a dead session. Per
+          // the MCP streamable-HTTP spec the server MUST respond 404 so the
+          // client starts a new session with a fresh InitializeRequest.
+          // Falling through to a new transport instead makes the SDK answer
+          // HTTP 400 "Server not initialized", which clients do not treat as
+          // a re-initialize signal — they keep retrying the dead session and
+          // every tool call times out with no useful error.
+          if (sessionId) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32001, message: 'Session not found' },
+              id: null,
+            }));
+            return;
+          }
+
           // Create new transport and server for new sessions
           const httpMcpServer = this.createMcpServer('-http');
           const httpStreamTransport = new StreamableHTTPServerTransport({
@@ -649,33 +676,22 @@ export class RoamServer {
 
       const desiredPort = parseInt(HTTP_STREAM_PORT);
 
-      if (serverMode) {
-        // A shared daemon must own a stable URL — never silently drift to another
-        // port. Fail loudly if the configured port is already taken on our bind
-        // host (a listener on a different interface is not our conflict).
-        if (await isPortInUse(desiredPort, HTTP_STREAM_HOST)) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `--server: port ${desiredPort} (HTTP_STREAM_PORT) is already in use. ` +
-            `Stop the process using it, or set HTTP_STREAM_PORT to a free port.`
-          );
-        }
-        httpServer.listen(desiredPort, HTTP_STREAM_HOST, () => {
-          console.error(
-            `roam-research-mcp v${serverVersion} (--server) listening on ` +
-            `http://${HTTP_STREAM_HOST}:${desiredPort}/  (health: /health)`
-          );
-        });
-      } else {
-        // Bind the companion HTTP transport to HTTP_STREAM_HOST (loopback by
-        // default) — listening without a host binds every interface, exposing
-        // the graph token-free on the LAN.
-        //
-        // Bind-and-retry rather than probe-then-bind: clients launch one
-        // instance per configured graph simultaneously, and a probe that closes
-        // before the real bind lets them all pick the same port.
-        await listenWithRetry(httpServer, desiredPort, 2, HTTP_STREAM_HOST);
+      // A shared daemon must own a stable URL — never silently drift to another
+      // port. Fail loudly if the configured port is already taken on our bind
+      // host (a listener on a different interface is not our conflict).
+      if (await isPortInUse(desiredPort, HTTP_STREAM_HOST)) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          `--server: port ${desiredPort} (HTTP_STREAM_PORT) is already in use. ` +
+          `Stop the process using it, or set HTTP_STREAM_PORT to a free port.`
+        );
       }
+      httpServer.listen(desiredPort, HTTP_STREAM_HOST, () => {
+        console.error(
+          `roam-research-mcp v${serverVersion} (--server) listening on ` +
+          `http://${HTTP_STREAM_HOST}:${desiredPort}/  (health: /health)`
+        );
+      });
 
 
 

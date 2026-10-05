@@ -25,10 +25,201 @@ function withMultiGraphParams(properties: Record<string, unknown>): Record<strin
   };
 }
 
+/**
+ * MCP tool annotations (behavioural hints clients use to gate tools).
+ *
+ * These are load-bearing: per the MCP spec an OMITTED annotation defaults to
+ * destructive + open-world, so an untagged read tool advertises itself as
+ * capable of irreversible damage. Every tool below must carry one of these.
+ *
+ * openWorldHint is false throughout — every tool acts on the user's own Roam
+ * graph, a closed domain. None reach an open-ended external system.
+ */
+type ToolAnnotations = {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+};
+
+/** Reads nothing but the graph. Repeatable, no side effects. */
+const READ: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+/** Adds new content only — never overwrites or removes. Repeating adds again. */
+const APPEND: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+
+/**
+ * Overwrites or relocates existing structure, so destructive — but idempotent:
+ * the same args produce the same end state.
+ */
+const EDIT: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+/**
+ * Can remove content irreversibly. Not idempotent — Roam has no undo history
+ * that can reverse bulk deletions made through the API, so a repeat is not a
+ * no-op you can recover from.
+ */
+const DESTRUCTIVE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+
+/**
+ * Output schemas for the write tools.
+ *
+ * Declared on writes only. Reads already serialise their whole result into the
+ * text channel, so a schema there would double the payload for nothing, and
+ * read shapes still move.
+ *
+ * Two rules hold these together:
+ *
+ *   1. `structuredContent` is present IFF the tool declares an `outputSchema`.
+ *      We use the low-level Server rather than McpServer, so the SDK does not
+ *      police that for us — `writeResult` in roam-server.ts is the only place
+ *      that may attach it, and it consults these declarations.
+ *   2. Changes to a declared field are ADDITIVE ONLY. A client can validate a
+ *      live response against a cached `tools/list`, so renaming or removing a
+ *      field breaks the tool for as long as that cache lives. Add a new field
+ *      and deprecate the old one; drop it in a major.
+ *
+ * Required lists come from the compiler, not from guesswork: a field is
+ * required here only where the handler's return type declares it non-optional.
+ */
+
+/** Common to every write result — the one field all ten genuinely share. */
+const SUCCESS_FIELD = { success: { type: 'boolean' } } as const;
+
+/**
+ * A block in a created tree. `children` is declared as a bare array rather
+ * than a recursive `$ref`: the nesting is genuinely unbounded, and validators
+ * differ enough on self-reference that being vague one level down is safer
+ * than being precise and rejected.
+ */
+const NESTED_BLOCK = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    uid: { type: 'string' },
+    text: { type: 'string' },
+    level: { type: 'number' },
+    order: { type: 'number' },
+    children: { type: 'array', description: 'Nested NestedBlock objects, same shape as this one' }
+  }
+} as const;
+
+/** The in-band error shape that batch-style tools return instead of throwing. */
+const STRUCTURED_ERROR = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    code: { type: 'string' },
+    message: { type: 'string' },
+    details: {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        action_index: { type: 'number' },
+        field: { type: 'string' },
+        expected: { type: 'string' },
+        received: { type: 'string' }
+      }
+    },
+    recovery: {
+      type: 'object',
+      additionalProperties: true,
+      properties: {
+        retry_after_ms: { type: 'number' },
+        suggestion: { type: 'string' }
+      }
+    }
+  }
+} as const;
+
+/** Counts from a page diff. */
+const DIFF_STATS = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    creates: { type: 'number' },
+    updates: { type: 'number' },
+    moves: { type: 'number' },
+    deletes: { type: 'number' },
+    preserved: { type: 'number' }
+  }
+} as const;
+
+/**
+ * Batch-style results. These tools report failure IN BAND rather than throwing,
+ * so `success: false` with an `error` is a normal return and only `success` can
+ * be required.
+ */
+const BATCH_RESULT_FIELDS = {
+  ...SUCCESS_FIELD,
+  uid_map: {
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    description: 'Placeholder name → generated UID. Present only on success.'
+  },
+  validation_passed: { type: 'boolean' },
+  actions_attempted: { type: 'number' },
+  error: {
+    anyOf: [{ type: 'string' }, STRUCTURED_ERROR],
+    description: 'Present only when success is false.'
+  }
+} as const;
+
+/** Builds an output schema that stays open to additive growth. */
+/** One task in a roam_triage_tasks report (mirrors TriagedTask in task-aging.ts). */
+const TRIAGED_TASK = {
+  type: 'object',
+  properties: {
+    uid: { type: 'string' },
+    content: { type: 'string' },
+    page_title: { type: 'string' },
+    age_days: { type: 'integer' },
+    action: { type: 'string' },
+  },
+} as const;
+
+function outputSchema(
+  properties: Record<string, unknown>,
+  required: string[]
+): Record<string, unknown> {
+  return { type: 'object', additionalProperties: true, properties, required };
+}
+
 export const toolSchemas = {
+  roam_get_guidelines: {
+    name: 'roam_get_guidelines',
+    annotations: READ,
+    description: 'Retrieve this graph\'s user-defined agent conventions, read from the `[[roam/agent guidelines]]` page inside the graph (configurable per graph). These are the user\'s own rules — how they tag, how they name and namespace pages, what to never do, how they want your voice attributed.\n\nAlso returns `roamSyntax`: the rules whose violation destroys content — whole-page rewrites that delete, truncated previews written back as content, retyped block references, and the syntax that differs from standard markdown. These are returned on every call, including when the graph has no guidelines page, and they hold regardless of what the conventions say.\n\nCall this ONCE per graph per session, before other tools, INCLUDING for reads: conventions change how results should be interpreted and presented, not just how content is written. Returns today\'s daily note title as orientation.\n\nDistinct from `roam_markdown_cheatsheet`, which is the complete syntax reference — components, queries, embeds, tool selection. Call that when you need to look something up; this one you need before writing at all. Returns exists:false rather than failing when no page has been created.',
+    inputSchema: {
+      type: 'object',
+      properties: withMultiGraphParams({}),
+    },
+  },
   roam_add_todo: {
     name: 'roam_add_todo',
-    description: 'Add a list of todo items as individual blocks to today\'s daily page in Roam. Each item becomes its own actionable block with todo status.\nNOTE on Roam-flavored markdown: For direct linking: use [[link]] syntax. For aliased linking, use [alias]([[link]]) syntax. Do not concatenate words in links/hashtags - correct: #[[multiple words]] #self-esteem (for typically hyphenated words).\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: APPEND,
+    outputSchema: outputSchema({ ...SUCCESS_FIELD }, ['success']),
+    description: 'Add a list of todo items as individual blocks to today\'s daily page in Roam. Each item becomes its own actionable block with todo status.\nNOTE on Roam-flavored markdown: For direct linking: use [[link]] syntax. For aliased linking, use [alias]([[link]]) syntax. Do not concatenate words in links/hashtags - correct: #[[multiple words]] #self-esteem (for typically hyphenated words).\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -46,7 +237,8 @@ export const toolSchemas = {
   },
   roam_fetch_page_by_title: {
     name: 'roam_fetch_page_by_title',
-    description: 'Fetch page by title. Returns content in the specified format.',
+    annotations: READ,
+    description: 'Fetch page by title. Returns content in the specified format.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -60,7 +252,7 @@ export const toolSchemas = {
           enum: ['markdown', 'raw', 'structure'],
           default: 'raw',
           description:
-            "Format output as markdown, JSON, or structure. 'markdown' returns readable string; 'raw' returns full JSON with nested blocks; 'structure' returns flattened list optimized for surgical updates (uid, order, text preview, depth, parent_uid)"
+            "Format output as markdown, JSON, or structure. 'markdown' returns readable string; 'raw' returns full JSON with nested blocks; 'structure' returns a flattened list (uid, order, text, depth, parent_uid) for locating blocks to update. In 'structure', `text` is a PREVIEW cut at 80 characters — an entry marked `truncated: true` is a fragment, and writing it back would replace the block with its own opening. Use it to find the uid, then fetch that block with roam_fetch_block before editing its text."
         }
       }),
       required: ['title']
@@ -68,7 +260,15 @@ export const toolSchemas = {
   },
   roam_create_page: {
     name: 'roam_create_page',
-    description: 'Create a new standalone page in Roam with optional content, including structured outlines and tables, using explicit nesting levels and headings (H1-H3). This is the preferred method for creating a new page with an outline in a single step. Best for:\n- Creating foundational concept pages that other pages will link to/from\n- Establishing new topic areas that need their own namespace\n- Setting up reference materials or documentation\n- Making permanent collections of information\n- Creating pages with mixed text and table content in one call.\n**Efficiency Tip:** This tool batches page and content creation efficiently. For adding content to existing pages, use `roam_process_batch_actions` instead.\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: APPEND,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        page_uid: { type: 'string', description: 'UID of the created page' }
+      },
+      ['success', 'page_uid']
+    ),
+    description: 'Create a new standalone page in Roam with optional content, including structured outlines and tables, using explicit nesting levels and headings (H1-H3). This is the preferred method for creating a new page with an outline in a single step. Best for:\n- Creating foundational concept pages that other pages will link to/from\n- Establishing new topic areas that need their own namespace\n- Setting up reference materials or documentation\n- Making permanent collections of information\n- Creating pages with mixed text and table content in one call.\n**Efficiency Tip:** This tool batches page and content creation efficiently. For adding content to existing pages, use `roam_process_batch_actions` instead.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -138,7 +338,21 @@ export const toolSchemas = {
   },
   roam_create_outline: {
     name: 'roam_create_outline',
-    description: 'Add a structured outline to an existing page or block (by title text or uid), with customizable nesting levels. To create a new page with an outline, use the `roam_create_page` tool instead. The `outline` parameter defines *new* blocks to be created. To nest content under an *existing* block, provide its UID or exact text in `block_text_uid`, and ensure the `outline` array contains only the child blocks with levels relative to that parent. Including the parent block\'s text in the `outline` array will create a duplicate block. Best for:\n- Adding supplementary structured content to existing pages\n- Creating temporary or working outlines (meeting notes, brainstorms)\n- Organizing thoughts or research under a specific topic\n- Breaking down subtopics or components of a larger concept\nBest for simpler, contiguous hierarchical content. For complex nesting (e.g., tables) or granular control over block placement, consider `roam_process_batch_actions` instead.\n**API Usage Note:** This tool performs verification queries after creation. For large outlines (10+ items) or when rate limits are a concern, consider using `roam_process_batch_actions` instead to minimize API calls.\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: APPEND,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        page_uid: { type: 'string' },
+        parent_uid: { type: 'string', description: 'Block the outline was nested under' },
+        created_blocks: {
+          type: 'array',
+          items: NESTED_BLOCK,
+          description: 'The created block tree. Objects, not UID strings.'
+        }
+      },
+      ['success', 'page_uid', 'parent_uid', 'created_blocks']
+    ),
+    description: 'Add a structured outline to an existing page or block (by title text or uid), with customizable nesting levels. To create a new page with an outline, use the `roam_create_page` tool instead. The `outline` parameter defines *new* blocks to be created. To nest content under an *existing* block, provide its UID or exact text in `block_text_uid`, and ensure the `outline` array contains only the child blocks with levels relative to that parent. Including the parent block\'s text in the `outline` array will create a duplicate block. Best for:\n- Adding supplementary structured content to existing pages\n- Creating temporary or working outlines (meeting notes, brainstorms)\n- Organizing thoughts or research under a specific topic\n- Breaking down subtopics or components of a larger concept\nBest for simpler, contiguous hierarchical content. For complex nesting (e.g., tables) or granular control over block placement, consider `roam_process_batch_actions` instead.\n**API Usage Note:** This tool performs verification queries after creation. For large outlines (10+ items) or when rate limits are a concern, consider using `roam_process_batch_actions` instead to minimize API calls.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -191,7 +405,21 @@ export const toolSchemas = {
   },
   roam_import_markdown: {
     name: 'roam_import_markdown',
-    description: 'Import nested markdown content into Roam under a specific block. Can locate the parent block by UID (preferred) or by exact string match within a specific page. If a `parent_string` is provided and the block does not exist, it will be created. Returns a nested structure of the created blocks.\n**API Usage Note:** This tool fetches the full nested structure after import for verification. For large imports or when rate limits are a concern, consider using `roam_process_batch_actions` with pre-structured actions instead.\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: APPEND,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        page_uid: { type: 'string' },
+        parent_uid: { type: 'string' },
+        created_blocks: {
+          type: 'array',
+          items: NESTED_BLOCK,
+          description: 'The created block tree. Objects, not UID strings.'
+        }
+      },
+      ['success', 'page_uid', 'parent_uid', 'created_blocks']
+    ),
+    description: 'Import nested markdown content into Roam under a specific block. Can locate the parent block by UID (preferred) or by exact string match within a specific page. If a `parent_string` is provided and the block does not exist, it will be created. Returns a nested structure of the created blocks.\n**API Usage Note:** This tool fetches the full nested structure after import for verification. For large imports or when rate limits are a concern, consider using `roam_process_batch_actions` with pre-structured actions instead.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -227,7 +455,8 @@ export const toolSchemas = {
   },
   roam_search_for_tag: {
     name: 'roam_search_for_tag',
-    description: 'Search for blocks containing a specific tag. Use `primary_tag` for the tag to find, and optionally `page_title_uid` to limit search to a specific page. Supports pagination via `limit` and `offset`. Use this tool to search for memories tagged with the ROAM_MEMORIES_TAG.',
+    annotations: READ,
+    description: 'Search for blocks containing a specific tag. Use `primary_tag` for the tag to find, and optionally `page_title_uid` to limit search to a specific page. Supports pagination via `limit` and `offset`. Use this tool to search for memories tagged with the ROAM_MEMORIES_TAG.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -264,7 +493,8 @@ export const toolSchemas = {
   },
   roam_search_by_status: {
     name: 'roam_search_by_status',
-    description: 'Search for blocks with a specific status (TODO/DONE) across all pages or within a specific page.',
+    annotations: READ,
+    description: 'Search for blocks with a specific status (TODO/DONE) across all pages or within a specific page.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -291,7 +521,8 @@ export const toolSchemas = {
   },
   roam_search_block_refs: {
     name: 'roam_search_block_refs',
-    description: 'Search for block references within a page or across the entire graph. Can search for references to a specific block, a page title, or find all block references.',
+    annotations: READ,
+    description: 'Search for block references within a page or across the entire graph. Can search for references to a specific block, a page title, or find all block references.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -312,7 +543,8 @@ export const toolSchemas = {
   },
   roam_search_hierarchy: {
     name: 'roam_search_hierarchy',
-    description: 'Search for parent or child blocks in the block hierarchy. Can search up or down the hierarchy from a given block.',
+    annotations: READ,
+    description: 'Search for parent or child blocks in the block hierarchy. Can search up or down the hierarchy from a given block.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -340,7 +572,8 @@ export const toolSchemas = {
   },
   roam_find_pages_modified_today: {
     name: 'roam_find_pages_modified_today',
-    description: 'Find pages that have been modified today (since midnight), with pagination and sorting options.',
+    annotations: READ,
+    description: 'Find pages that have been modified today (since midnight), with pagination and sorting options.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -365,7 +598,8 @@ export const toolSchemas = {
   },
   roam_search_by_text: {
     name: 'roam_search_by_text',
-    description: 'Search for blocks containing specific text across all pages or within a specific page. Use `scope: "page_titles"` to search for pages by namespace prefix (e.g., "Convention/" finds all pages starting with that prefix). This tool supports pagination via the `limit` and `offset` parameters.',
+    annotations: READ,
+    description: 'Search for blocks containing specific text across all pages or within a specific page. Use `scope: "page_titles"` to search for pages by namespace prefix (e.g., "Convention/" finds all pages starting with that prefix). This tool supports pagination via the `limit` and `offset` parameters.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -404,7 +638,8 @@ export const toolSchemas = {
   },
   roam_search_by_date: {
     name: 'roam_search_by_date',
-    description: 'Search for blocks or pages based on creation or modification dates. Not for daily pages with ordinal date titles.',
+    annotations: READ,
+    description: 'Search for blocks or pages based on creation or modification dates. Not for daily pages with ordinal date titles.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -437,7 +672,8 @@ export const toolSchemas = {
   },
   roam_markdown_cheatsheet: {
     name: 'roam_markdown_cheatsheet',
-    description: 'Provides the comprehensive Roam syntax reference. Covers: formatting, links & references (page refs, block refs, embeds including embed-children and embed-path), tags, dates, tasks, attributes, queries (native and :q Datalog tables with built-in rules), tables, kanban, mermaid diagrams (with theme support), advanced components (dropdowns, tooltips, templates, document mode, word-count), CSS tags (#.rm-E, #.rm-hide, etc.), anti-patterns, tool selection guide, and API efficiency tips.\n\n**IMPORTANT:** Always load this cheatsheet before creating or updating Roam content. It prevents common syntax errors and guides tool selection.',
+    annotations: READ,
+    description: 'Provides the comprehensive Roam syntax reference. Covers: formatting, links & references (page refs, block refs, embeds including embed-children and embed-path), tags, dates, tasks, callouts, attributes, queries (native `{{query}}` with its clause rules and page-ref inheritance, plus :q Datalog tables with built-in rules), tables, kanban, mermaid diagrams (with theme support), advanced components (dropdowns, tooltips, templates, document mode, word-count), CSS tags (#.rm-E, #.rm-hide, etc.), anti-patterns, tool selection guide, and API efficiency tips.\n\n**IMPORTANT:** Always load this cheatsheet before creating or updating Roam content. It prevents common syntax errors and guides tool selection.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({}),
@@ -446,7 +682,16 @@ export const toolSchemas = {
   },
   roam_remember: {
     name: 'roam_remember',
-    description: 'Add a memory or piece of information to remember, stored on the daily page with ROAM_MEMORIES_TAG tag and optional categories (unless include_memories_tag is false). \nNOTE on Roam-flavored markdown: For direct linking: use [[link]] syntax. For aliased linking, use [alias]([[link]]) syntax. Do not concatenate words in links/hashtags - correct: #[[multiple words]] #self-esteem (for typically hyphenated words).\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: APPEND,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        block_uid: { type: 'string', description: 'UID of the stored memory block' },
+        parent_uid: { type: 'string' }
+      },
+      ['success']
+    ),
+    description: 'Add a memory or piece of information to remember, stored on the daily page with ROAM_MEMORIES_TAG tag and optional categories (unless include_memories_tag is false). \nNOTE on Roam-flavored markdown: For direct linking: use [[link]] syntax. For aliased linking, use [alias]([[link]]) syntax. Do not concatenate words in links/hashtags - correct: #[[multiple words]] #self-esteem (for typically hyphenated words).\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -480,7 +725,8 @@ export const toolSchemas = {
   },
   roam_recall: {
     name: 'roam_recall',
-    description: 'Retrieve all stored memories on page titled ROAM_MEMORIES_TAG, or tagged block content with the same name. Returns a combined, deduplicated list of memories. Optionally filter blocks with a specific tag and sort by creation date.',
+    annotations: READ,
+    description: 'Retrieve all stored memories on page titled ROAM_MEMORIES_TAG, or tagged block content with the same name. Returns a combined, deduplicated list of memories. Optionally filter blocks with a specific tag and sort by creation date.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -499,7 +745,8 @@ export const toolSchemas = {
   },
   roam_datomic_query: {
     name: 'roam_datomic_query',
-    description: 'Execute a custom Datomic query on the Roam graph for advanced data retrieval beyond the available search tools. This provides direct access to Roam\'s query engine. Note: Roam graph is case-sensitive.\n\n__Optimal Use Cases for `roam_datomic_query`:__\n- __Advanced Filtering (including Regex):__ Use for scenarios requiring complex filtering, including regex matching on results post-query, which Datalog does not natively support for all data types. It can fetch broader results for client-side post-processing.\n- __Highly Complex Boolean Logic:__ Ideal for intricate combinations of "AND", "OR", and "NOT" conditions across multiple terms or attributes.\n- __Arbitrary Sorting Criteria:__ The go-to for highly customized sorting needs beyond default options.\n- __Proximity Search:__ For advanced search capabilities involving proximity, which are difficult to implement efficiently with simpler tools.\n\nList of some of Roam\'s data model Namespaces and Attributes: ancestor (descendants), attrs (lookup), block (children, heading, open, order, page, parents, props, refs, string, text-align, uid), children (view-type), create (email, time), descendant (ancestors), edit (email, seen-by, time), entity (attrs), log (id), node (title), page (uid, title), refs (text).\nPredicates (clojure.string/includes?, clojure.string/starts-with?, clojure.string/ends-with?, <, >, <=, >=, =, not=, !=).\nAggregates (distinct, count, sum, max, min, avg, limit).\nTips: Use :block/parents for all ancestor levels, :block/children for direct descendants only; combine clojure.string for complex matching, use distinct to deduplicate, leverage Pull patterns for hierarchies, handle case-sensitivity carefully, and chain ancestry rules for multi-level queries.',
+    annotations: READ,
+    description: 'Execute a custom Datomic query on the Roam graph for advanced data retrieval beyond the available search tools. This provides direct access to Roam\'s query engine. Note: Roam graph is case-sensitive.\n\n__Optimal Use Cases for `roam_datomic_query`:__\n- __Advanced Filtering (including Regex):__ Use for scenarios requiring complex filtering, including regex matching on results post-query, which Datalog does not natively support for all data types. It can fetch broader results for client-side post-processing.\n- __Highly Complex Boolean Logic:__ Ideal for intricate combinations of "AND", "OR", and "NOT" conditions across multiple terms or attributes.\n- __Arbitrary Sorting Criteria:__ The go-to for highly customized sorting needs beyond default options.\n- __Proximity Search:__ For advanced search capabilities involving proximity, which are difficult to implement efficiently with simpler tools.\n\nList of some of Roam\'s data model Namespaces and Attributes: ancestor (descendants), attrs (lookup), block (children, heading, open, order, page, parents, props, refs, string, text-align, uid), children (view-type), create (email, time), descendant (ancestors), edit (email, seen-by, time), entity (attrs), log (id), node (title), page (uid, title), refs (text).\nPredicates (clojure.string/includes?, clojure.string/starts-with?, clojure.string/ends-with?, <, >, <=, >=, =, not=, !=).\nAggregates (distinct, count, sum, max, min, avg, limit).\nTips: Use :block/parents for all ancestor levels, :block/children for direct descendants only; combine clojure.string for complex matching, use distinct to deduplicate, leverage Pull patterns for hierarchies, handle case-sensitivity carefully, and chain ancestry rules for multi-level queries.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -535,7 +782,9 @@ export const toolSchemas = {
   },
   roam_process_batch_actions: {
     name: 'roam_process_batch_actions',
-    description: '**RATE LIMIT EFFICIENT:** This is the most API-efficient tool for multiple block operations. Combine all create/update/delete operations into a single call whenever possible. For intensive page updates or revisions, prefer this tool over multiple sequential calls.\n\nExecutes a sequence of low-level block actions (create, update, move, delete) in a single, non-transactional batch. Actions are executed in the provided order.\n\n**UID Placeholders for Nested Blocks:** Use `{{uid:name}}` syntax for parent-child references within the same batch. The server generates proper random UIDs and returns a `uid_map` showing placeholder→UID mappings. Example: `{ uid: "{{uid:parent1}}", string: "Parent" }` then `{ location: { "parent-uid": "{{uid:parent1}}" }, string: "Child" }`. Response includes `{ success: true, uid_map: { "parent1": "Xk7mN2pQ9" } }`.\n\nFor actions on existing blocks, a valid block UID is required. Note: Roam-flavored markdown, including block embedding with `((UID))` syntax, is supported within the `string` property for `create-block` and `update-block` actions. For actions on existing blocks or within a specific page context, it is often necessary to first obtain valid page or block UIDs. Tools like `roam_fetch_page_by_title` or other search tools can be used to retrieve these UIDs before executing batch actions. For simpler, sequential outlines, `roam_create_outline` is often more suitable.\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: DESTRUCTIVE,
+    outputSchema: outputSchema({ ...BATCH_RESULT_FIELDS }, ['success']),
+    description: '**RATE LIMIT EFFICIENT:** This is the most API-efficient tool for multiple block operations. Combine all create/update/delete operations into a single call whenever possible. For intensive page updates or revisions, prefer this tool over multiple sequential calls.\n\nExecutes a sequence of low-level block actions (create, update, move, delete) in a single, non-transactional batch. Actions are executed in the provided order.\n\n**UID Placeholders for Nested Blocks:** Use `{{uid:name}}` syntax for parent-child references within the same batch. The server generates proper random UIDs and returns a `uid_map` showing placeholder→UID mappings. Example: `{ uid: "{{uid:parent1}}", string: "Parent" }` then `{ location: { "parent-uid": "{{uid:parent1}}" }, string: "Child" }`. Response includes `{ success: true, uid_map: { "parent1": "Xk7mN2pQ9" } }`.\n\nFor actions on existing blocks, a valid block UID is required. Note: Roam-flavored markdown, including block embedding with `((UID))` syntax, is supported within the `string` property for `create-block` and `update-block` actions. For actions on existing blocks or within a specific page context, it is often necessary to first obtain valid page or block UIDs. Tools like `roam_fetch_page_by_title` or other search tools can be used to retrieve these UIDs before executing batch actions. For simpler, sequential outlines, `roam_create_outline` is often more suitable.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -601,7 +850,8 @@ export const toolSchemas = {
   },
   roam_fetch_block: {
     name: 'roam_fetch_block',
-    description: 'Fetch a block by its UID with optional children (down to a specified depth) and/or ancestors (up to page root). Returns the block\'s UID, text, order, children array, and optionally an ancestors array with the chain to the page root.',
+    annotations: READ,
+    description: 'Fetch a block by its UID with optional children (down to a specified depth) and/or ancestors (up to page root). Returns the block\'s UID, text, order, children array, and optionally an ancestors array with the chain to the page root.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -626,7 +876,12 @@ export const toolSchemas = {
   },
   roam_create_table: {
     name: 'roam_create_table',
-    description: 'Create a table in Roam with specified headers and rows. This tool abstracts the complex nested structure that Roam tables require, making it much easier to create properly formatted tables.\n\n**Why use this tool:**\n- Roam tables require precise nested block structures that are error-prone to create manually\n- Automatically handles the {{[[table]]}} container and nested column structure\n- Validates row/column consistency before execution\n- Converts empty cells to spaces (required by Roam)\n\n**Example:** A table with headers ["", "Column A", "Column B"] and rows [{label: "Row 1", cells: ["A1", "B1"]}] creates a 2x3 table.\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: APPEND,
+    outputSchema: outputSchema(
+      { ...BATCH_RESULT_FIELDS, table_uid: { type: 'string' } },
+      ['success']
+    ),
+    description: 'Create a table in Roam with specified headers and rows. This tool abstracts the complex nested structure that Roam tables require, making it much easier to create properly formatted tables.\n\n**Why use this tool:**\n- Roam tables require precise nested block structures that are error-prone to create manually\n- Automatically handles the {{[[table]]}} container and nested column structure\n- Validates row/column consistency before execution\n- Converts empty cells to spaces (required by Roam)\n\n**Example:** A table with headers ["", "Column A", "Column B"] and rows [{label: "Row 1", cells: ["A1", "B1"]}] creates a 2x3 table.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -674,7 +929,17 @@ export const toolSchemas = {
   },
   roam_move_block: {
     name: 'roam_move_block',
-    description: 'Move a block to a new location (different parent or position). This is a convenience wrapper around `roam_process_batch_actions` for single block moves.',
+    annotations: EDIT,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        block_uid: { type: 'string' },
+        new_parent_uid: { type: 'string' },
+        order: { anyOf: [{ type: 'number' }, { type: 'string' }] }
+      },
+      ['success', 'block_uid', 'new_parent_uid', 'order']
+    ),
+    description: 'Move a block to a new location (different parent or position). This is a convenience wrapper around `roam_process_batch_actions` for single block moves.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -697,7 +962,26 @@ export const toolSchemas = {
   },
   roam_update_page_markdown: {
     name: 'roam_update_page_markdown',
-    description: 'Update an existing page with new markdown content using smart diff. Preserves block UIDs where possible and generates minimal changes. This is ideal for:\n- Syncing external markdown files to Roam\n- AI-assisted content updates that preserve references\n- Batch content modifications without losing block references\n\n**How it works:**\n1. Fetches existing page blocks\n2. Matches new content to existing blocks by text similarity\n3. Generates minimal create/update/move/delete operations\n4. Preserves UIDs for matched blocks (keeping references intact)\n\nIMPORTANT: Before using this tool, ensure that you have loaded into context the \'Roam Markdown Cheatsheet\' resource.',
+    annotations: EDIT,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        actions: { type: 'array', description: 'Roam batch actions applied (or planned, when dry_run)' },
+        stats: DIFF_STATS,
+        preserved_uids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Blocks whose UIDs survived the diff, so refs to them still resolve'
+        },
+        preserved_hidden: {
+          type: 'number',
+          description: 'Present only when non-zero: how many #.rm-hide / #.rm-private blocks were excluded from the diff and left on the page untouched'
+        },
+        summary: { type: 'string' }
+      },
+      ['success', 'actions', 'stats', 'preserved_uids', 'summary']
+    ),
+    description: 'Update an existing page with new markdown content using smart diff. Preserves block UIDs where possible and generates minimal changes. This is ideal for:\n- Syncing external markdown files to Roam\n- AI-assisted content updates that preserve references\n- Batch content modifications without losing block references\n\n**⚠️ This REPLACES the page, it does not append.** Any block your markdown does not account for is deleted. Pass the complete intended page, or use `roam_process_batch_actions` / `roam_create_outline` to change only part of one. Use `dry_run: true` to see the actions first.\n\n**How it works:**\n1. Fetches existing page blocks\n2. Matches new content to existing blocks by text similarity\n3. Generates minimal create/update/move/delete operations\n4. Preserves UIDs for matched blocks (keeping references intact)\n\n`#.rm-hide` / `#.rm-private` subtrees are excluded from the diff and left untouched — you cannot see them, so you cannot be asked to account for them. `preserved_hidden` reports how many, when any.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session, and load the Roam Markdown Cheatsheet, before using this tool.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -720,7 +1004,8 @@ export const toolSchemas = {
   },
   roam_fetch_page_full_view: {
     name: 'roam_fetch_page_full_view',
-    description: 'Fetch a complete page view that mirrors what Roam Research shows in its UI: the page\'s own content, plus all linked references (backlinks) grouped by source page, each with their ancestor breadcrumb context and children expanded to the specified depth. Use this when you need the full picture of a page — both what is written on it and everything else in the graph that references it.',
+    annotations: READ,
+    description: 'Fetch a complete page view that mirrors what Roam Research shows in its UI: the page\'s own content, plus all linked references (backlinks) grouped by source page, each with their ancestor breadcrumb context and children expanded to the specified depth. Use this when you need the full picture of a page — both what is written on it and everything else in the graph that references it.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -747,7 +1032,8 @@ export const toolSchemas = {
   },
   roam_get_subpages: {
     name: 'roam_get_subpages',
-    description: 'Fetch all sub-pages (namespace children) of a given page prefix. Matches by page title prefix — pages titled "Prefix/Something" are sub-pages of "Prefix" and appear in the Hierarchy section of that page. This is namespace/title-prefix matching, distinct from roam_search_hierarchy which traverses block parent/child relationships. Optionally filter to only sub-pages containing a specific tag (e.g. filter active projects with filter_tag="active"), and optionally include each sub-page\'s full block content.',
+    annotations: READ,
+    description: 'Fetch all sub-pages (namespace children) of a given page prefix. Matches by page title prefix — pages titled "Prefix/Something" are sub-pages of "Prefix" and appear in the Hierarchy section of that page. This is namespace/title-prefix matching, distinct from roam_search_hierarchy which traverses block parent/child relationships. Optionally filter to only sub-pages containing a specific tag (e.g. filter active projects with filter_tag="active"), and optionally include each sub-page\'s full block content.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -770,7 +1056,9 @@ export const toolSchemas = {
   },
   roam_rename_page: {
     name: 'roam_rename_page',
-    description: 'Rename a page by changing its title. Identifies the page by current title or UID.',
+    annotations: EDIT,
+    outputSchema: outputSchema({ ...SUCCESS_FIELD, message: { type: 'string' } }, ['success', 'message']),
+    description: 'Rename a page by changing its title. Identifies the page by current title or UID.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -792,7 +1080,32 @@ export const toolSchemas = {
   },
   roam_triage_tasks: {
     name: 'roam_triage_tasks',
-    description: 'Scan undated TODO blocks and apply aging tags (#at-risk, #stale) based on how long they have sat without a due date. Fresh tasks (< at_risk_days) are untouched. At-risk tasks get #at-risk appended. Stale tasks get #stale appended (and #at-risk removed if present). Tasks already tagged #parked or #someday are skipped. Tasks with date page refs ([[Month Day, Year]]) or #due/#scheduled tags are skipped. Use dry_run=true to preview without writing.',
+    annotations: EDIT,
+    outputSchema: outputSchema(
+      {
+        ...SUCCESS_FIELD,
+        dry_run: { type: 'boolean' },
+        thresholds: {
+          type: 'object',
+          properties: { at_risk_days: { type: 'integer' }, stale_days: { type: 'integer' } },
+        },
+        summary: {
+          type: 'object',
+          properties: {
+            fresh: { type: 'integer' },
+            at_risk: { type: 'integer' },
+            stale: { type: 'integer' },
+            parked: { type: 'integer' },
+            skipped_dated: { type: 'integer' },
+            tags_applied: { type: 'integer' },
+          },
+        },
+        at_risk: { type: 'array', items: TRIAGED_TASK },
+        stale: { type: 'array', items: TRIAGED_TASK },
+      },
+      ['success', 'dry_run', 'thresholds', 'summary', 'at_risk', 'stale']
+    ),
+    description: 'Scan undated TODO blocks and apply aging tags (#at-risk, #stale) based on how long they have sat without a due date. Fresh tasks (< at_risk_days) are untouched. At-risk tasks get #at-risk appended. Stale tasks get #stale appended (and #at-risk removed if present). Tasks already tagged #parked or #someday are skipped. Tasks with date page refs ([[Month Day, Year]]) or #due/#scheduled tags are skipped. Use dry_run=true to preview without writing.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
