@@ -104,7 +104,6 @@ declare module '@roam-research/roam-api-sdk' {
       uid?: string;
       title?: string;
     };
-    title: string;
   }
 
   export function updatePage(
