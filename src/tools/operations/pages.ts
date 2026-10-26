@@ -1063,9 +1063,10 @@ export class PageOperations {
     const pageIdentifier = uid ? { uid } : { title: old_title };
 
     try {
+      // Roam's update-page reads the new title from inside `page`; a top-level
+      // `title` is ignored and the call returns ok without renaming anything.
       const success = await updatePage(this.graph, {
-        page: pageIdentifier,
-        title: new_title
+        page: { ...pageIdentifier, title: new_title }
       });
 
       if (success) {

@@ -48,9 +48,10 @@ Examples:
           printDebug('Page identifier', pageIdentifier);
         }
 
+        // Roam's update-page reads the new title from inside `page`; a top-level
+        // `title` is ignored and the call returns ok without renaming anything.
         const success = await updatePage(graph, {
-          page: pageIdentifier,
-          title: newTitle
+          page: { ...pageIdentifier, title: newTitle }
         });
 
         if (success) {
