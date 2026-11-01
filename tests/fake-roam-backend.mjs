@@ -29,6 +29,23 @@ const PAGES = {
   // Digit-free on purpose, like roughly one real UID in five. `roam save` used
   // to decide "is this a UID" by looking for a digit.
   'Save Fixture': 'savePgAbc',
+  // Two pages so a page-scoped status search has something to leave out.
+  'Status Fixture': 'statusPg1',
+  'Status Other': 'statusPg2',
+  // Titles that must survive being written into a query literal. A raw `"`
+  // ends the literal early; a raw `\n` reads back as a newline, so the lookup
+  // silently misses rather than failing.
+  'Alex "Sandy" Pentland': 'quotePg01',
+  'C:\\newdir Notes': 'bslashPg1',
+  'Search Fixture': 'searchPg1',
+  'Pagination Fixture': 'pagingPg1',
+  PagingTag: 'pagingTg1',
+  OtherPagingTag: 'pagingTg2',
+  'Paging/Zebra': 'pagingPgZ',
+  'Paging/Apple': 'pagingPgA',
+  'Paging/Middle': 'pagingPgM',
+  aPiTag: 'mixedTag1',
+  aPiTagExtra: 'mixedTag2',
 };
 
 /**
@@ -93,6 +110,68 @@ const BLOCKS = {
     // `roam save --parent "((uid))"` finds or creates.
     ['exRefAbcd', '((exHeadAbc))', 2, 'savePgAbc'],
   ],
+  // Status markers in both spellings. `{{[[TODO]]}}` is what Roam's checkbox
+  // writes and does not contain `{{TODO`, which is how roam_search_by_status
+  // went years returning only the rare bare form.
+  statusPg1: [
+    ['stBrkTodo', '{{[[TODO]]}} bracketed task', 0, 'statusPg1'],
+    ['stBareTod', '{{TODO}} bare task', 1, 'statusPg1'],
+    ['stBrkDone', '{{[[DONE]]}} bracketed finished', 2, 'statusPg1'],
+    ['stBareDon', '{{DONE}} bare finished', 3, 'statusPg1'],
+    ['stHidTodo', '{{[[TODO]]}} withheld task #.rm-hide', 4, 'statusPg1'],
+    // The word alone is not a marker, in either spelling.
+    ['stPlain01', 'mentions TODO and DONE in prose, not a task', 5, 'statusPg1'],
+  ],
+  statusPg2: [
+    ['stOthTodo', '{{[[TODO]]}} task on another page', 0, 'statusPg2'],
+  ],
+  quotePg01: [
+    ['quoteBlk1', 'Said "never again" and meant it', 0, 'quotePg01'],
+  ],
+  bslashPg1: [
+    ['bslashBk1', 'Notes kept under a Windows path', 0, 'bslashPg1'],
+  ],
+  searchPg1: [
+    ['caseMix01', 'An aPi client', 0, 'searchPg1'],
+    ['caseLow01', 'An api client', 1, 'searchPg1'],
+    ['caseUni01', 'An ÄpI client', 2, 'searchPg1'],
+    ['caseLit01', 'a.B[0] "Quoted" C:\\newdir', 3, 'searchPg1'],
+    ['caseDec01', 'axb0 Quoted C:newdir', 4, 'searchPg1'],
+    ['caseDate1', '2026-10-01', 5, 'searchPg1'],
+    ['caseTag01', 'Tagged [[aPiTag]]', 6, 'searchPg1'],
+    ['caseTag02', 'Tagged [[aPiTagExtra]]', 7, 'searchPg1'],
+  ],
+};
+
+BLOCKS.pagingPg1 = [
+  ['pag000000', 'paging item [[PagingTag]] #.rm-hide', 0, 'pagingPg1'],
+  ...Array.from({ length: 60 }, (_, i) => [
+    `pag${String(i + 1).padStart(6, '0')}`,
+    `paging item ${i + 1} [[PagingTag]]${i % 2 === 0 ? ' [[OtherPagingTag]]' : ''}`,
+    i + 1, 'pagingPg1',
+  ]),
+  ['pag000061', 'paging item only second tag [[OtherPagingTag]]', 61, 'pagingPg1'],
+];
+
+// Independent datoms for search tests. Their dates deliberately disagree with
+// block text, and a missing attribute stays missing (it is never "now").
+const TIMES = {
+  page00001: { create: Date.parse('2026-10-01T06:00:00-07:00'), edit: Date.parse('2026-10-02T06:00:00-07:00') },
+  bslashPg1: { create: Date.parse('2026-09-01T12:00:00-07:00'), edit: Date.parse('2026-10-01T12:00:00-07:00') },
+  vis000001: { create: Date.parse('2026-10-01T12:00:00-07:00'), edit: Date.parse('2026-10-02T12:00:00-07:00') },
+  vis000002: { create: Date.parse('2026-09-01T12:00:00-07:00'), edit: Date.parse('2026-10-01T12:00:00-07:00') },
+  long00001: { create: Date.parse('2026-10-01T23:59:59.999-07:00') },
+  soft00001: { create: Date.parse('2026-10-02T00:00:00-07:00') },
+  near00001: { create: Date.parse('2026-10-01T09:00:00-07:00'), edit: Date.parse('2026-10-01T10:00:00-07:00') },
+  hid000001: { create: Date.parse('2026-10-01T12:00:00-07:00') },
+  hidchild1: { create: Date.parse('2026-10-01T12:00:00-07:00') },
+  caseDate1: { create: Date.parse('2026-09-01T12:00:00-07:00') },
+  caseMix01: { create: Date.parse('2026-03-08T23:59:59.999-07:00') },
+  caseLow01: { create: Date.parse('2026-03-09T00:00:00-07:00') },
+};
+const BLOCK_TAGS = { caseTag01: ['aPiTag'], caseTag02: ['aPiTagExtra'],
+  ...Object.fromEntries(BLOCKS.pagingPg1.map(([uid, text]) => [uid,
+    ['PagingTag', 'OtherPagingTag'].filter(tag => text.includes(`[[${tag}]]`))])),
 };
 
 /**
@@ -187,7 +266,109 @@ function pullTree(uid) {
   return children;
 }
 
+/**
+ * Thrown for query text Roam would refuse. The `/q` handler turns it into the
+ * HTTP 500 Roam sends, which the SDK reports as `Error: <message>`.
+ */
+class RoamQueryError extends Error {}
+
+const EDN_ESCAPES = { '"': '"', '\\': '\\', n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
+
+/**
+ * Read the EDN string literal whose opening quote is at `start`.
+ * Returns its decoded value and the index just past its closing quote.
+ */
+function readEdnString(query, start) {
+  let value = '';
+  for (let i = start + 1; i < query.length; i++) {
+    const ch = query[i];
+    if (ch === '"') return { value, end: i + 1 };
+    if (ch !== '\\') {
+      value += ch;
+      continue;
+    }
+    const next = query[++i];
+    if (!(next in EDN_ESCAPES)) {
+      throw new RoamQueryError(`java.lang.RuntimeException: Unsupported escape character: \\${next}`);
+    }
+    value += EDN_ESCAPES[next];
+  }
+  throw new RoamQueryError('java.lang.RuntimeException: EOF while reading string');
+}
+
+/** Index just past the closing quote of the regex literal opening at `start`. */
+function readRegexLiteral(query, start) {
+  for (let i = start + 1; i < query.length; i++) {
+    if (query[i] === '\\') i++;
+    else if (query[i] === '"') return i + 1;
+  }
+  throw new RoamQueryError('java.lang.RuntimeException: EOF while reading regex');
+}
+
+/**
+ * Refuse a query whose string literals do not read cleanly, as Roam does.
+ *
+ * A value interpolated without escaping leaves a literal butted against the
+ * next token: `"Alex "Sandy" Pentland"` reads as `"Alex "`, `Sandy`,
+ * `" Pentland"`, a clause with too many parts, and Roam answers
+ * IndexOutOfBoundsException. Every literal a well-formed query writes is
+ * followed by whitespace or a closing bracket, so anything else is treated
+ * the same way.
+ */
+function assertWellFormed(query) {
+  for (let i = 0; i < query.length; i++) {
+    if (query[i] !== '"') continue;
+    // A regex literal `#"..."` passes every escape through to the pattern.
+    const end = query[i - 1] === '#' ? readRegexLiteral(query, i) : readEdnString(query, i).end;
+    if (end < query.length && !/[\s\])]/.test(query[end])) {
+      throw new RoamQueryError('java.lang.IndexOutOfBoundsException');
+    }
+    i = end - 1;
+  }
+}
+
+/** Decoded values of every string literal that directly follows `prefix`. */
+function literalsAfter(query, prefix) {
+  const values = [];
+  for (let at = query.indexOf(prefix); at !== -1; at = query.indexOf(prefix, at + 1)) {
+    const quote = at + prefix.length;
+    if (query[quote] === '"') values.push(readEdnString(query, quote).value);
+  }
+  return values;
+}
+
+// Interpret the regex predicates the query actually uses, rather than assume
+// that a bound pattern was applied. Java's (?iu) flags map to JS's /iu here.
+function regexPredicate(query, variable) {
+  for (const match of query.matchAll(/\[\(re-pattern /g)) {
+    const { value, end } = readEdnString(query, match.index + match[0].length);
+    const patternVar = query.slice(end).match(/^\)\s+(\?[\w-]+)\]/)?.[1];
+    if (!patternVar) continue;
+    const whole = query.includes(`[(re-matches ${patternVar} ${variable})]`);
+    if (!whole && !query.includes(`[(re-find ${patternVar} ${variable})]`)) continue;
+    const flags = value.startsWith('(?iu)') ? 'iu' : value.startsWith('(?i)') ? 'i' : '';
+    const source = value.replace(/^\(\?iu?\)/, '');
+    const regex = new RegExp(whole ? `^(?:${source})$` : source, flags);
+    return (text) => regex.test(text);
+  }
+}
+
 function answer(query, args) {
+  assertWellFormed(query);
+
+  if (query.includes(':find ?uid ?string ?order ?heading')) {
+    const asked = new Set(args?.[0] ?? []);
+    return allBlocks().filter(([uid]) => asked.has(uid)).map(([uid, text, order]) => [uid, text, order, 0]);
+  }
+  if (query.includes(':find ?uid ?string')) {
+    const asked = new Set(args?.[0] ?? []);
+    return allBlocks().filter(([uid]) => asked.has(uid)).map(([uid, text]) => [uid, text, 0]);
+  }
+  if (query.includes(':find ?parentUid ?childUid ?childString')) {
+    const asked = new Set(args?.[0] ?? []);
+    return allBlocks().filter(([, , , parent]) => asked.has(parent)).map(([uid, text, order, parent]) => [parent, uid, text, order, 0]);
+  }
+
   // Existence check for a set of UIDs (`batchCheckExistence` in
   // src/shared/page-validator.ts): which of these are the :block/uid of any
   // entity? Pages carry :block/uid too, so they count. Every batch write asks
@@ -221,7 +402,7 @@ function answer(query, args) {
   // The diff baseline: a scalar `(pull ?page [... {:block/children ...}])`
   // keyed by a page uid inlined in the query text rather than bound via :in.
   if (query.includes('(pull ?page') && query.includes(':block/children')) {
-    const pageUid = query.match(/:block\/uid "([^"]+)"/)?.[1];
+    const pageUid = literalsAfter(query, ':block/uid ')[0];
     if (!pageUid || !BLOCKS[pageUid]) return null;
     return { ':block/uid': pageUid, ':block/children': pullTree(pageUid) };
   }
@@ -250,8 +431,8 @@ function answer(query, args) {
   // to observe what was actually written, to catch content ending up merged
   // into the wrong block.
   if (query.includes(':find ?b-uid ?order')) {
-    const pageUid = query.match(/:block\/uid "([^"]*)"/)?.[1];
-    const blockString = query.match(/:block\/string "([^"]*)"/)?.[1];
+    const pageUid = literalsAfter(query, ':block/uid ')[0];
+    const blockString = literalsAfter(query, ':block/string ')[0];
     if (pageUid === undefined || blockString === undefined) return [];
     return CREATED_BLOCKS
       .filter(([, str, , parentUid]) => parentUid === pageUid && str === blockString)
@@ -270,6 +451,69 @@ function answer(query, args) {
     return match ? [[match[1]]] : [];
   }
 
+  // Timestamp search: evaluate the requested attributes and range against
+  // fixture datoms. Pages have titles; blocks have strings and a page link.
+  if (query.includes(':find ?uid ?content ?page-title ?time')) {
+    const inputVars = (query.match(/:in \$([^:]*)/)?.[1] ?? '').match(/\?[\w-]+/g) ?? [];
+    const bound = Object.fromEntries(inputVars.map((name, i) => [name, args?.[i]]));
+    const attributes = [...query.matchAll(/\[\?e :(create|edit)\/time \?time\]/g)].map(m => m[1]);
+    const comparisons = [...query.matchAll(/\[\((>=|>|<=|<) \?time (\?[\w-]+)\)\]/g)];
+    const entities = query.includes('[?e :block/string ?content]')
+      ? Object.entries(BLOCKS).flatMap(([pageUid, blocks]) => blocks.map(([uid, content]) =>
+          [uid, content, Object.keys(PAGES).find(title => PAGES[title] === pageUid)]))
+      : Object.entries(PAGES).map(([title, uid]) => [uid, title, title]);
+    return entities.flatMap(([uid, content, title]) => attributes.flatMap(attribute => {
+      const time = TIMES[uid]?.[attribute];
+      const inRange = comparisons.every(([, op, variable]) => {
+        const value = bound[variable];
+        if (op === '>=') return time >= value;
+        if (op === '>') return time > value;
+        if (op === '<=') return time <= value;
+        return time < value;
+      });
+      return typeof time === 'number' && inRange
+        ? [[uid, content, title, time]] : [];
+    }));
+  }
+
+  // roam_search_by_status (src/search/status-search.ts). Unlike the branches
+  // above this one EVALUATES the query rather than recognising it: it reads
+  // which `:in` variables the `includes?` clauses actually test `?block-str`
+  // against, and matches only on those. Markers passed as inputs but never
+  // used in a clause match nothing, so a query that binds both spellings and
+  // tests one fails here the way it would against Roam. Text and tag searches
+  // share the find-vars; evaluate their literal or regex predicates as well.
+  if (query.includes(':find ?block-uid ?block-str ?page-title ?block-create-time ?block-edit-time') ||
+      (query.includes(':find (count ?b)') && query.includes('?block-str'))) {
+    const inVars = (query.match(/:in \$([^:]*)/)?.[1] ?? '').match(/\?[\w-]+/g) ?? [];
+    const bound = Object.fromEntries(inVars.map((name, i) => [name, args?.[i]]));
+    const tested = [
+      ...[...query.matchAll(/\[\(clojure\.string\/includes\? \?block-str (\?[\w-]+)\)\]/g)]
+        .map((m) => bound[m[1]])
+        .filter((marker) => typeof marker === 'string'),
+      // roam_search_by_text inlines its term, once per case variation.
+      ...literalsAfter(query, '[(clojure.string/includes? ?block-str '),
+    ];
+    const textPredicate = regexPredicate(query, '?block-str');
+    const tagPredicate = regexPredicate(query, '?ref-page-title');
+    const exactTags = literalsAfter(query, '[?ref-page :node/title ');
+    if (tested.length > 0 || textPredicate || tagPredicate || exactTags.length > 0) {
+      const titleOf = Object.fromEntries(Object.entries(PAGES).map(([title, uid]) => [uid, title]));
+      const scope = bound['?page-uid'] ?? bound['?target-page-uid'];
+      const rows = Object.entries(BLOCKS)
+        .filter(([pageUid]) => scope === undefined || pageUid === scope)
+        .flatMap(([pageUid, blocks]) =>
+          blocks
+            .filter(([uid, str]) => textPredicate ? textPredicate(str) :
+              tagPredicate ? (BLOCK_TAGS[uid] ?? []).some(tagPredicate) :
+              exactTags.length > 0 ? (BLOCK_TAGS[uid] ?? []).some(tag => exactTags.includes(tag)) :
+              tested.some((marker) => str.includes(marker)))
+            .map(([uid, str]) => [uid, str, titleOf[pageUid], TIMES[uid]?.create ?? 0, TIMES[uid]?.edit ?? 0])
+        );
+      return query.includes(':find (count ?b)') ? [[rows.length]] : rows;
+    }
+  }
+
   // fetchReferringBlocks: backlinks to a page, via `:block/refs`. Distinctive
   // find-vars combo (`?block-uid ?block-str ?page-title ?page-uid`) so this is
   // checked BEFORE the generic `:node/title` branch below -- the query also
@@ -282,9 +526,27 @@ function answer(query, args) {
     return REFERRING_BLOCKS[targetTitle] ?? [];
   }
 
+  // `SearchUtils.findPageByTitleOrUid`'s last resort, once the title lookups
+  // have missed: is this value the UID of anything? The UID is inlined in the
+  // query text rather than bound.
+  const inlinedUid = /:find \?uid :where \[\?e :block\/uid "/.test(query)
+    ? literalsAfter(query, ':block/uid ')[0]
+    : undefined;
+  if (inlinedUid !== undefined) {
+    const known = [...Object.values(PAGES), ...allBlocks().map(([uid]) => uid)];
+    return known.includes(inlinedUid) ? [[inlinedUid]] : [];
+  }
+
+  // Namespace discovery returns unsorted relation rows; callers must sort
+  // before applying an offset (not page then sort that partial window).
+  if (query.includes(':find ?title ?uid') && query.includes('starts-with?')) {
+    const prefix = literalsAfter(query, '[(clojure.string/starts-with? ?title ')[0];
+    return Object.entries(PAGES).filter(([title]) => title.startsWith(prefix)).map(([title, uid]) => [title, uid]);
+  }
+
   // Page lookup by title. `:find ?uid .` is a scalar find — return the bare uid.
   if (query.includes(':node/title')) {
-    const titles = [...query.matchAll(/:node\/title "([^"]*)"/g)].map((m) => m[1]);
+    const titles = literalsAfter(query, ':node/title ');
     const bound = typeof args?.[0] === 'string' ? [args[0]] : [];
     for (const title of [...titles, ...bound]) {
       if (PAGES[title]) {
@@ -316,7 +578,16 @@ globalThis.fetch = async function fakeRoamFetch(input, init) {
 
   if (request.url.endsWith('/q')) {
     const { query, args } = await request.json();
-    return json({ result: answer(query, args) });
+    if (process.env.FAKE_ROAM_QUERY_LOG) appendFileSync(process.env.FAKE_ROAM_QUERY_LOG, JSON.stringify({ query, args }) + '\n');
+    try {
+      return json({ result: answer(query, args) });
+    } catch (error) {
+      if (!(error instanceof RoamQueryError)) throw error;
+      return new Response(JSON.stringify({ message: error.message }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
   }
 
   if (request.url.endsWith('/pull')) {
