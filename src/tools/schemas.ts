@@ -179,6 +179,14 @@ const BATCH_RESULT_FIELDS = {
   },
   validation_passed: { type: 'boolean' },
   actions_attempted: { type: 'number' },
+  committed: {
+    type: 'object', additionalProperties: true,
+    properties: {
+      action_indices: { type: 'array', items: { type: 'number' } },
+      uids: { type: 'object', additionalProperties: { type: 'string' } },
+    },
+    description: 'Confirmed successful actions from a failed batch; other actions may have an unknown outcome.',
+  },
   error: {
     anyOf: [{ type: 'string' }, STRUCTURED_ERROR],
     description: 'Present only when success is false.'
@@ -456,7 +464,7 @@ export const toolSchemas = {
   roam_search_for_tag: {
     name: 'roam_search_for_tag',
     annotations: READ,
-    description: 'Search for blocks containing a specific tag. Use `primary_tag` for the tag to find, and optionally `page_title_uid` to limit search to a specific page. Supports pagination via `limit` and `offset`. Use this tool to search for memories tagged with the ROAM_MEMORIES_TAG.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
+    description: 'Search for blocks containing a specific tag. Use `primary_tag` for the tag to find, and optionally `page_title_uid` to limit search to a specific page. Supports pagination via `limit` and `offset`, applied after hidden-block filtering in UID order. Use this tool to search for memories tagged with the ROAM_MEMORIES_TAG.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -474,7 +482,7 @@ export const toolSchemas = {
         },
         case_sensitive: {
           type: 'boolean',
-          description: 'Optional: Whether the search should be case-sensitive. If false, it will search for the provided tag, capitalized versions, and first word capitalized versions.',
+          description: 'Optional: Whether the search should be case-sensitive. Defaults to Unicode-aware case-insensitive matching of the complete tag title.',
           default: false
         },
         limit: {
@@ -599,7 +607,7 @@ export const toolSchemas = {
   roam_search_by_text: {
     name: 'roam_search_by_text',
     annotations: READ,
-    description: 'Search for blocks containing specific text across all pages or within a specific page. Use `scope: "page_titles"` to search for pages by namespace prefix (e.g., "Convention/" finds all pages starting with that prefix). This tool supports pagination via the `limit` and `offset` parameters.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
+    description: 'Search for blocks containing specific text across all pages or within a specific page. Use `scope: "page_titles"` to search for pages by namespace prefix (e.g., "Convention/" finds all pages starting with that prefix). This tool supports pagination via the `limit` and `offset` parameters. Pagination follows hidden-block filtering; block results use UID order and namespace results use title order.\n\nIMPORTANT: call roam_get_guidelines for this graph once per session before using this tool, reads included — conventions change how results are read, not just written.',
     inputSchema: {
       type: 'object',
       properties: withMultiGraphParams({
@@ -619,7 +627,7 @@ export const toolSchemas = {
         },
         case_sensitive: {
           type: 'boolean',
-          description: 'Optional: Whether the search should be case-sensitive. If false, it will search for the provided text, capitalized versions, and first word capitalized versions. Only used when scope is "blocks".',
+          description: 'Optional: Whether the search should be case-sensitive. Defaults to Unicode-aware case-insensitive matching of literal text. Only used when scope is "blocks".',
           default: false
         },
         limit: {
@@ -645,16 +653,16 @@ export const toolSchemas = {
       properties: withMultiGraphParams({
         start_date: {
           type: 'string',
-          description: 'Start date in ISO format (YYYY-MM-DD)',
+          description: 'Inclusive start date in ISO format (YYYY-MM-DD), in the server\'s local timezone.',
         },
         end_date: {
           type: 'string',
-          description: 'Optional: End date in ISO format (YYYY-MM-DD)',
+          description: 'Optional: Inclusive end date in ISO format (YYYY-MM-DD), in the server\'s local timezone. Omit for no upper bound.',
         },
         type: {
           type: 'string',
           enum: ['created', 'modified', 'both'],
-          description: 'Whether to search by creation date, modification date, or both',
+          description: 'Whether to search stored creation timestamps, modification timestamps, or either. With "both", each entity is returned once with its latest matching timestamp.',
         },
         scope: {
           type: 'string',
@@ -663,7 +671,7 @@ export const toolSchemas = {
         },
         include_content: {
           type: 'boolean',
-          description: 'Whether to include the content of matching blocks/pages',
+          description: 'Whether to include matching block text or page titles. Defaults to true.',
           default: true,
         }
       }),

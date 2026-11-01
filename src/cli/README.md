@@ -215,6 +215,13 @@ Predicates: `clojure.string/includes?`, `clojure.string/starts-with?`, `<`, `>`,
 
 ---
 
+Search pagination is applied after hidden-block and tag filters, and before
+block-reference expansion. Results use UID order (namespace results use title
+order). `--offset` skips visible matches; `--limit -1` returns all remaining
+matches. MCP text/tag searches default to 50 results; the CLI defaults to 20.
+The backend still returns matching rows: these limits bound output and reference
+lookups, rather than claiming a bounded backend scan.
+
 ## `roam save`
 
 Save text, files, or JSON to pages/blocks. Auto-detects format.
@@ -537,3 +544,15 @@ roam save -g work --write-key confirm "Meeting notes"
 ```
 
 See the main project documentation for environment variable configuration.
+
+### Transport failures and partial batches
+
+Transport failures preserve `http_status`, `retry_after_ms`, and the backend's
+`num_actions_succeeded` when present. CLI transport errors use JSON on stderr
+and a non-zero exit status. Failed batches also report `committed.action_indices`
+and any confirmed placeholder UIDs; `uid_map` remains success-only.
+
+Retries honor `Retry-After`. Writes with a confirmed successful prefix or an
+unknown outcome are surfaced without automatic replay. A confirmed zero-action
+rate-limit rejection can retry. Inspect the graph before resubmitting a failed
+batch whose outcome is partial or unknown.

@@ -1,5 +1,47 @@
 # Changelog
 
+### v5.1.1 (2026-10-23)
+
+Date searches now use Roam's stored timestamps, and case-insensitive searches find arbitrary mixed capitalization, including Unicode. Fixes [#26](https://github.com/2b3pro/roam-research-mcp/pull/26).
+
+- **Date search:** honors block, page, and combined scopes; includes the complete end date in the server's local timezone, including daylight-saving transitions; and rejects invalid or reversed date ranges. When searching both creation and edit times, each entity appears once with its latest matching timestamp.
+- **Case-insensitive matching:** uses escaped literal patterns rather than a few capitalization variants. Tag titles match in full, and an explicit `case_sensitive` choice now reaches the tag handler.
+- **Regression coverage:** 20 new MCP tests cover these corrections, date boundaries, literal metacharacters, and hidden-subtree filtering. All 539 tests pass.
+
+### v5.1.0 (2026-10-20)
+
+**In one line:** a server running without `HTTP_AUTH_TOKEN` now refuses requests from web pages that reach it by DNS rebinding. Through 5.0.2, such a page could call every tool on it.
+
+**Why a minor.** It changes what the HTTP transport accepts. Without a token the server now answers only requests addressed to `localhost`, an IP address, or a name in the new `HTTP_ALLOWED_HOSTS`, and refuses browser requests from an origin outside `CORS_ORIGIN`. With a token set nothing changes, and stdio mode is not affected: it opens no socket.
+
+- **What was open.** A web page can point its own hostname at `127.0.0.1` after it loads. The browser then treats the server as same-origin, so CORS never applies, and the page could read every graph and write to any graph not marked `protected`. Advisory: [GHSA-xr34-mh43-4cqm](https://github.com/2b3pro/roam-research-mcp/security/advisories/GHSA-xr34-mh43-4cqm).
+- **If you reach a token-less server by name.** A Docker service name, `mybox.local`, or any name other than `localhost` now gets a 403 that says which setting to change. Add the name to `HTTP_ALLOWED_HOSTS`, or set `HTTP_AUTH_TOKEN`, the better fix for anything beyond your own machine. Connecting by IP address works as before.
+- **If a browser page calls the server.** Its origin must be in `CORS_ORIGIN`, as it already had to be for the page to read the responses.
+- **Docker works.** The `docker run` example and Compose file could never be reached; they now bind the container's interface, publish on host loopback only, pin the port, and run with an init process. Compose refuses to start without `HTTP_AUTH_TOKEN`.
+- **Tested at the wire.** New tests drive the real server with forged `Host` and `Origin` headers, with and without a token. The refusal tests fail against 5.0.2, which answers 200.
+- **Thanks** to [@dajiaohuang](https://github.com/dajiaohuang) for making the Docker setup reachable ([#24](https://github.com/2b3pro/roam-research-mcp/pull/24)).
+
+### v5.0.2 (2026-10-13)
+
+**In one line:** pages, blocks and search terms containing `"` or `\` now work. Through 5.0.1 they made Roam reject the query, so a page like `Alex "Sandy" Pentland` could not be fetched by title.
+
+**Why a patch.** No parameter, default, or result shape changes. Values were written into Datalog string literals without escaping. A `"` ended the literal early and Roam answered `IndexOutOfBoundsException`. A `\` was read as an escape, so a title like `C:\newdir Notes` was looked up with a newline in it and silently not found. Every such value is now escaped.
+
+- **What was broken:** fetching or targeting a page by a title containing `"` (83 pages on one real graph), creating such a page through `roam_create_outline`, `roam_search_by_text` for a quoted phrase, and the CLI's batch page lookups. `roam_create_outline` also returned an empty `created_blocks` for any block whose text contained `"`, without reporting an error.
+- **Tested at the wire.** New tests drive the real server with quoted and backslashed titles, block text and search terms. The fake backend now reads query strings the way Roam does and refuses a malformed one with the same error, so an unescaped value fails there too.
+- **Thanks** to [@notlakshitha](https://github.com/notlakshitha) for the report and for tracing it to the interpolation sites ([#23](https://github.com/2b3pro/roam-research-mcp/issues/23)).
+
+### v5.0.1 (2026-10-05)
+
+**In one line:** `roam_search_by_status` was missing almost every task, because it never matched `{{[[TODO]]}}`, the form Roam's own checkbox writes; it now finds both spellings.
+
+**Why a patch.** No parameter, default, or result shape changes. The tool does what its description always said. It searched for the text `{{TODO` on the belief that this matched both `{{[[TODO]]}}` and `{{TODO}}`, but the bracketed form has `[[` where that needs `TODO`, so only the rare bare form was ever returned. On one real graph that was 5 tasks out of 291; on another, 1 out of 4,223. `DONE` had the same fault. The CLI's `roam get --todo` and `--done` go through the same search and are fixed with it.
+
+- **Expect far more results.** This is the fix working, but it is a large change in volume: an unscoped `status: "TODO"` search can now return thousands of blocks in one response where it used to return a handful. Narrow it with `page_title_uid` or `include` if that is more than you want. The tool has no limit parameter yet.
+- **Hidden blocks stay hidden.** Tasks tagged `#.rm-hide` or `#.rm-private`, and anything nested under them, are still withheld, and this is now pinned by a test.
+- **Tested at the wire.** New tests drive the real server and check what a client receives, for both spellings, for `DONE`, and for a search scoped to a page by title or by UID. The fake backend they run against matches only on the inputs the query really tests, so a query that binds both spellings and uses one fails.
+- **Thanks** to [@drenaud0214](https://github.com/drenaud0214) for finding this, tracing it to the exact clause, and sending the fix ([#22](https://github.com/2b3pro/roam-research-mcp/pull/22)).
+
 ### v5.0.0 (2026-09-29)
 
 **In one line:** `roam save --parent` is now always the text of the parent block and never a UID; use `--parent-uid` to nest under a block by UID.
