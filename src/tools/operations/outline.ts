@@ -1,3 +1,4 @@
+import { rethrowRoamError } from '../../shared/errors.js';
 import { Graph, q, createPage, createBlock } from '@roam-research/roam-api-sdk';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { formatRoamDate } from '../../utils/helpers.js';
@@ -16,6 +17,7 @@ import {
 } from '../../markdown-utils.js';
 import { executeStagedBatch } from '../../shared/staged-batch.js';
 import type { OutlineItem, NestedBlock } from '../types/index.js';
+import { ednString } from '../../shared/datalog.js';
 
 // Threshold for skipping child fetch during verification
 const VERIFICATION_THRESHOLD = 5;
@@ -45,9 +47,9 @@ export class OutlineOperations {
   private async findBlockWithRetry(pageUid: string, blockString: string, maxRetries = 2, initialDelay = 1000): Promise<string> {
     // Use only the most reliable query strategy (direct page and string match)
     const query = `[:find ?b-uid ?order
-        :where [?p :block/uid "${pageUid}"]
+        :where [?p :block/uid ${ednString(pageUid)}]
                [?b :block/page ?p]
-               [?b :block/string "${blockString}"]
+               [?b :block/string ${ednString(blockString)}]
                [?b :block/order ?order]
                [?b :block/uid ?b-uid]]`;
 
@@ -109,6 +111,7 @@ export class OutlineOperations {
           // Try to find the block using our improved findBlockWithRetry
           return await this.findBlockWithRetry(parentUid, content);
         } catch (error: any) {
+          rethrowRoamError(error);
           const errorMessage = error instanceof Error ? error.message : String(error);
           // console.log(`Failed to find block on attempt ${retry + 1}: ${errorMessage}`); // Removed console.log
           if (retry === maxRetries - 1) throw error;
@@ -120,6 +123,7 @@ export class OutlineOperations {
         `Failed to create and verify block "${content}" after ${maxRetries} attempts`
       );
     } catch (error) {
+      rethrowRoamError(error);
       // If this is already a retry, throw the error
       if (isRetry) throw error;
 
@@ -186,6 +190,7 @@ export class OutlineOperations {
       // The order of the root block is not available from this query, so we set it to 0
       return { uid: blockUid, text, level, order: 0, children: children.length > 0 ? children : undefined };
     } catch (error: any) {
+      rethrowRoamError(error);
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to fetch block with children for UID "${blockUid}": ${error.message}`
@@ -269,7 +274,7 @@ export class OutlineOperations {
         if (this.isValidUid(block_text_uid)) {
           // First try to find block by UID
           const uidQuery = `[:find ?uid
-                           :where [?e :block/uid "${block_text_uid}"]
+                           :where [?e :block/uid ${ednString(block_text_uid)}]
                                   [?e :block/uid ?uid]]`;
           const uidResult = await q(this.graph, uidQuery, []) as [string][];
 
@@ -287,6 +292,7 @@ export class OutlineOperations {
           targetParentUid = await this.createAndVerifyBlock(block_text_uid, targetPageUid);
         }
       } catch (error: any) {
+        rethrowRoamError(error);
         const errorMessage = error instanceof Error ? error.message : String(error);
         throw new McpError(
           ErrorCode.InternalError,
@@ -364,6 +370,7 @@ export class OutlineOperations {
         delayBetweenLevels: 100
       });
     } catch (error: any) {
+      rethrowRoamError(error);
       if (error instanceof McpError) throw error;
       throw new McpError(
         ErrorCode.InternalError,
@@ -429,7 +436,7 @@ export class OutlineOperations {
 
     // If page_uid is provided, verify it exists
     if (page_uid) {
-      const verifyQuery = `[:find ?uid :where [?e :block/uid "${page_uid}"] [?e :block/uid ?uid]]`;
+      const verifyQuery = `[:find ?uid :where [?e :block/uid ${ednString(page_uid)}] [?e :block/uid ?uid]]`;
       const verifyResult = await q(this.graph, verifyQuery, []) as [string][];
       if (!verifyResult || verifyResult.length === 0) {
         throw new McpError(

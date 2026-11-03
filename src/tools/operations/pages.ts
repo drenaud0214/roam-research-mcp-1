@@ -1,8 +1,9 @@
+import { RoamError, rethrowRoamError } from '../../shared/errors.js';
 import { Graph, q, createPage as createRoamPage, updatePage } from '@roam-research/roam-api-sdk';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { ANCESTOR_RULE } from '../../search/ancestor-rule.js';
 import { getPageUid as getPageUidHelper } from '../helpers/page-resolution.js';
-import { resolveRefs, resolveBlockRefs } from '../helpers/refs.js';
+import { resolveRefsMany, resolveBlockRefs } from '../helpers/refs.js';
 import { executeBatch, executeBatchSafe } from '../helpers/batch-utils.js';
 import { pruneHiddenBlocks } from '../helpers/hidden.js';
 import type { RoamBlock } from '../types/index.js';
@@ -14,7 +15,7 @@ import {
 } from '../../markdown-utils.js';
 import { executeStagedBatch } from '../../shared/staged-batch.js';
 import { escapeBlockString, unescapeBlockString, needsNewlineEscaping, ESCAPED_NEWLINES_MARKER, SOFT_BREAK_SENTINEL } from '../../shared/block-escaping.js';
-import { pageUidCache } from '../../cache/page-uid-cache.js';
+import { getPageUidCache } from '../../cache/page-uid-cache.js';
 import { buildTableActions, type TableRow } from './table.js';
 import { BatchOperations } from './batch.js';
 import {
@@ -31,6 +32,7 @@ import {
   type DiffStats,
   type RoamApiBlock,
 } from '../../diff/index.js';
+import { ednString } from '../../shared/datalog.js';
 
 // Content item types for createPage
 export interface TextContentItem {
@@ -122,6 +124,7 @@ export class PageOperations {
         message: `Found ${uniquePages.length} page(s) modified today`
       };
     } catch (error: any) {
+      rethrowRoamError(error);
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to find modified pages: ${error.message}`
@@ -148,7 +151,7 @@ export class PageOperations {
     let pageUid: string | undefined;
 
     // Check cache first to avoid unnecessary query
-    const cachedUid = pageUidCache.get(pageTitle);
+    const cachedUid = getPageUidCache(this.graph).get(pageTitle);
     if (cachedUid) {
       pageUid = cachedUid;
     } else {
@@ -160,7 +163,7 @@ export class PageOperations {
       if (findResults && findResults.length > 0) {
         // Page exists, use its UID and cache it
         pageUid = findResults[0][0];
-        pageUidCache.set(pageTitle, pageUid);
+        getPageUidCache(this.graph).set(pageTitle, pageUid);
       } else {
         // Create new page by adding a page reference to today's daily page
         // This leverages Roam's native behavior: [[Page Title]] creates the page instantly
@@ -173,7 +176,7 @@ export class PageOperations {
           const dailyPageTitle = `${month} ${day}${getOrdinalSuffix(day)}, ${year}`;
 
           // Get or create daily page UID
-          const dailyPageQuery = `[:find ?uid . :where [?e :node/title "${dailyPageTitle}"] [?e :block/uid ?uid]]`;
+          const dailyPageQuery = `[:find ?uid . :where [?e :node/title ${ednString(dailyPageTitle)}] [?e :block/uid ?uid]]`;
           let dailyPageUid = await q(this.graph, dailyPageQuery, []) as unknown as string | null;
 
           if (!dailyPageUid) {
@@ -205,11 +208,12 @@ export class PageOperations {
           }
           pageUid = results[0][0];
           // Cache the newly created page
-          pageUidCache.onPageCreated(pageTitle, pageUid);
+          getPageUidCache(this.graph).onPageCreated(pageTitle, pageUid);
           // Small delay for new page to be fully available as parent in Roam
           // (fixes "Parent entity doesn't exist" error when adding content immediately)
           await new Promise(resolve => setTimeout(resolve, 400));
         } catch (error) {
+          rethrowRoamError(error);
           throw new McpError(
             ErrorCode.InternalError,
             `Failed to create page: ${error instanceof Error ? error.message : String(error)}`
@@ -224,7 +228,7 @@ export class PageOperations {
         // Idempotency check: If page already has content, skip adding more
         // This prevents duplicate content when the tool is called twice
         const existingBlocksQuery = `[:find (count ?b) .
-                                      :where [?p :block/uid "${pageUid}"]
+                                      :where [?p :block/uid ${ednString(pageUid)}]
                                              [?p :block/children ?b]]`;
         const existingBlockCountResult = await q(this.graph, existingBlocksQuery, []);
         const existingBlockCount = typeof existingBlockCountResult === 'number' ? existingBlockCountResult : 0;
@@ -389,7 +393,13 @@ export class PageOperations {
 
             const tableResult = await this.batchOps.processBatch(tableActions);
             if (!tableResult.success) {
-              throw new Error(`Failed to create table: ${typeof tableResult.error === 'string' ? tableResult.error : tableResult.error?.message}`);
+              if (tableResult.error && typeof tableResult.error !== 'string') {
+                const { code, message, ...metadata } = tableResult.error;
+                throw new RoamError(`Failed to create table: ${message}`, code, {
+                  ...metadata, ...(tableResult.committed && { committed: tableResult.committed }),
+                });
+              }
+              throw new Error(`Failed to create table: ${tableResult.error}`);
             }
 
             // Only increment top-level order for level 1 tables
@@ -405,6 +415,7 @@ export class PageOperations {
         // Flush any remaining text items
         await flushTextItems(currentOrder);
       } catch (error) {
+        rethrowRoamError(error);
         throw new McpError(
           ErrorCode.InternalError,
           `Failed to add content to page: ${error instanceof Error ? error.message : String(error)}`
@@ -447,7 +458,7 @@ export class PageOperations {
     }
 
     // First get the page title
-    const titleQuery = `[:find ?title . :where [?e :block/uid "${uid}"] [?e :node/title ?title]]`;
+    const titleQuery = `[:find ?title . :where [?e :block/uid ${ednString(uid)}] [?e :node/title ?title]]`;
     const title = await q(this.graph, titleQuery, []) as unknown as string | null;
 
     if (!title) {
@@ -762,9 +773,9 @@ export class PageOperations {
     }
 
     // For markdown, resolve references inline
-    await Promise.all(visibleBlocks.map(async b => {
-      b.string = await resolveRefs(this.graph, b.string);
-    }));
+    const resolvedStrings = await resolveRefsMany(this.graph, visibleBlocks.map(block => block.string), 4,
+      new Map(visibleBlocks.map(block => [block.uid, block.string])));
+    visibleBlocks.forEach((block, index) => { block.string = resolvedStrings[index]; });
 
     // Collect every visible block string to decide whether this page needs the
     // encoding at all. A page with no soft line break renders exactly as it
@@ -865,7 +876,7 @@ export class PageOperations {
                             :block/heading
                             {:block/children ...}
                           ]) .
-                          :where [?page :block/uid "${pageUid}"]]`;
+                          :where [?page :block/uid ${ednString(pageUid)}]]`;
 
     const pageData = await q(this.graph, blocksQuery, []) as unknown as RoamApiBlock | null;
 
@@ -1017,6 +1028,7 @@ export class PageOperations {
           delayBetweenLevels: 100
         });
       } catch (error) {
+        rethrowRoamError(error);
         throw new McpError(
           ErrorCode.InternalError,
           `Failed to apply changes: ${error instanceof Error ? error.message : String(error)}`
@@ -1063,12 +1075,16 @@ export class PageOperations {
     const pageIdentifier = uid ? { uid } : { title: old_title };
 
     try {
+      // Roam's update-page reads the new title from inside `page`; a top-level
+      // `title` is ignored and the call returns ok without renaming anything.
       const success = await updatePage(this.graph, {
-        page: pageIdentifier,
-        title: new_title
+        page: { ...pageIdentifier, title: new_title }
       });
 
       if (success) {
+        // Titles (including case-variation aliases) are no longer valid after
+        // a rename. Invalidate this connection only; other graphs stay warm.
+        getPageUidCache(this.graph).clear();
         const identifier = uid ? `((${uid}))` : `"${old_title}"`;
         return {
           success: true,
@@ -1081,6 +1097,7 @@ export class PageOperations {
         };
       }
     } catch (error) {
+      rethrowRoamError(error);
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to rename page: ${error instanceof Error ? error.message : String(error)}`

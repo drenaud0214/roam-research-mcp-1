@@ -14,6 +14,7 @@ import {
 import { type Graph } from '@roam-research/roam-api-sdk';
 import { HTTP_STREAM_PORT, HTTP_STREAM_HOST, HTTP_AUTH_TOKEN, validateEnvironment } from '../config/environment.js';
 import { isBearerAuthorized } from '../utils/auth.js';
+import { rebindingRefusal } from '../utils/host-validation.js';
 import { RoamError, toErrorResult } from '../shared/errors.js';
 import { createRegistryFromEnv, GraphRegistry, isWriteOperation } from '../config/graph-registry.js';
 import { toolSchemas } from '../tools/schemas.js';
@@ -24,7 +25,7 @@ import { join, dirname } from 'node:path';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { isPortInUse } from '../utils/net.js';
-import { CORS_ORIGINS } from '../config/environment.js';
+import { CORS_ORIGINS, HTTP_ALLOWED_HOSTS } from '../config/environment.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -312,10 +313,13 @@ export class RoamServer {
           }
 
           case 'roam_search_for_tag': {
-            const { primary_tag, page_title_uid, near_tag } = cleanedArgs as {
+            const { primary_tag, page_title_uid, near_tag, case_sensitive, limit, offset } = cleanedArgs as {
               primary_tag: string;
               page_title_uid?: string;
               near_tag?: string;
+              case_sensitive?: boolean;
+              limit?: number;
+              offset?: number;
             };
             if (!primary_tag) {
               throw new McpError(
@@ -323,7 +327,7 @@ export class RoamServer {
                 'Missing required parameter: primary_tag (the tag to search for). Use page_title_uid to limit search to a specific page.'
               );
             }
-            const result = await toolHandlers.searchForTag(primary_tag, page_title_uid, near_tag);
+            const result = await toolHandlers.searchForTag(primary_tag, page_title_uid, near_tag, case_sensitive, limit, offset);
             return toolResult(request.params.name, result);
           }
 
@@ -381,6 +385,7 @@ export class RoamServer {
               text: string;
               page_title_uid?: string;
               scope?: 'blocks' | 'page_titles';
+              case_sensitive?: boolean;
             };
             const result = await toolHandlers.searchByText(params);
             return toolResult(request.params.name, result);
@@ -392,7 +397,7 @@ export class RoamServer {
               end_date?: string;
               type: 'created' | 'modified' | 'both';
               scope: 'blocks' | 'pages' | 'both';
-              include_content: boolean;
+              include_content?: boolean;
             };
             const result = await toolHandlers.searchByDate(params);
             return toolResult(request.params.name, result);
@@ -554,6 +559,22 @@ export class RoamServer {
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
         res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
         res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+        // Without a token, refuse what a DNS-rebinding web page sends: a Host
+        // this server doesn't answer to, or an Origin CORS_ORIGIN doesn't allow.
+        // Checked before /health, which lists the graph names.
+        if (!HTTP_AUTH_TOKEN) {
+          const refusal = rebindingRefusal(req, HTTP_ALLOWED_HOSTS, CORS_ORIGINS);
+          if (refusal) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32001, message: `Forbidden: ${refusal}` },
+              id: null,
+            }));
+            return;
+          }
+        }
 
         // Handle preflight OPTIONS requests
         if (req.method === 'OPTIONS') {

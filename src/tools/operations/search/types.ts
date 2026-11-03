@@ -3,6 +3,8 @@ import type { SearchResult } from '../../types/index.js';
 // Base search parameters
 export interface BaseSearchParams {
   page_title_uid?: string;
+  limit?: number;
+  offset?: number;
 }
 
 // Datomic search parameters
@@ -18,6 +20,7 @@ export interface DatomicSearchParams {
 export interface TagSearchParams extends BaseSearchParams {
   primary_tag: string;
   near_tag?: string;
+  case_sensitive?: boolean;
 }
 
 // Block reference search parameters
@@ -37,6 +40,7 @@ export interface HierarchySearchParams extends BaseSearchParams {
 export interface TextSearchParams extends BaseSearchParams {
   text: string;
   scope?: 'blocks' | 'page_titles';
+  case_sensitive?: boolean;
 }
 
 // Status search parameters
@@ -49,4 +53,5 @@ export interface SearchHandlerResult {
   success: boolean;
   matches: SearchResult[];
   message: string;
+  total_count?: number;
 }
