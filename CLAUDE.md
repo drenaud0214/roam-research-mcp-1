@@ -2,8 +2,7 @@
 
 David's fork of the upstream Roam Research MCP server and `roam` CLI.
 `README.md` is upstream's and describes the project; this file is how to work
-in this clone. The clone is `~/system/roam-research-mcp` on the Air and
-`~/dev/roam-research-mcp` on the Mini.
+in this clone. The clone is `~/system/roam-research-mcp` on both Macs.
 
 ## Branch and remotes
 
